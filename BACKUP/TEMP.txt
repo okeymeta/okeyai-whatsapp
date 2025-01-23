@@ -1,0 +1,300 @@
+import axios from 'axios';
+import chalk from 'chalk';
+import qrcode from 'qrcode-terminal';
+import whatsappweb from 'whatsapp-web.js';
+import fs from 'fs';
+
+const { Client, LocalAuth } = whatsappweb;
+
+// Configure retry and rate limiting
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 5000;
+const MESSAGE_QUEUE_INTERVAL = 2000; // Time between messages (2 seconds)
+const TYPING_DURATION = { MIN: 2000, MAX: 4000 }; // Random typing duration between 2-4 seconds
+const MAX_CONCURRENT_CHATS = 15; // Maximum number of simultaneous chats
+const DAILY_MESSAGE_LIMIT = 1000; // Maximum messages per day
+const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
+
+// Create sessions directory if it doesn't exist
+const SESSION_DIR = './.wwebjs_auth';
+if (!fs.existsSync(SESSION_DIR)) {
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+}
+
+// Message queue and rate limiting
+class MessageQueue {
+    constructor() {
+        this.queue = new Map(); // Queue for each user
+        this.messageCount = new Map(); // Track message counts
+        this.activeChatCount = 0;
+        this.dailyMessages = 0;
+        this.hourlyMessages = 0;
+        this.lastReset = Date.now();
+        
+        // Reset counters periodically
+        setInterval(() => this.resetHourlyCount(), 3600000); // Reset hourly
+        setInterval(() => this.resetDailyCount(), 86400000); // Reset daily
+    }
+
+    resetHourlyCount() {
+        this.hourlyMessages = 0;
+    }
+
+    resetDailyCount() {
+        this.dailyMessages = 0;
+    }
+
+    canProcessMessage() {
+        const now = Date.now();
+        
+        // Reset counters if a day has passed
+        if (now - this.lastReset > 86400000) {
+            this.resetDailyCount();
+            this.resetHourlyCount();
+            this.lastReset = now;
+        }
+
+        return this.activeChatCount < MAX_CONCURRENT_CHATS &&
+               this.dailyMessages < DAILY_MESSAGE_LIMIT &&
+               this.hourlyMessages < HOURLY_MESSAGE_LIMIT;
+    }
+
+    async addToQueue(chat, message, handler) {
+        const userId = message.from;
+        
+        if (!this.queue.has(userId)) {
+            this.queue.set(userId, []);
+            this.messageCount.set(userId, 0);
+        }
+
+        this.queue.get(userId).push({ chat, message, handler });
+        
+        // Start processing queue for this user if not already processing
+        if (this.queue.get(userId).length === 1) {
+            this.processQueue(userId);
+        }
+    }
+
+    async processQueue(userId) {
+        const userQueue = this.queue.get(userId);
+        
+        while (userQueue.length > 0) {
+            if (!this.canProcessMessage()) {
+                // Wait and check again if limits are exceeded
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                continue;
+            }
+
+            const { chat, message, handler } = userQueue[0];
+            
+            try {
+                this.activeChatCount++;
+                this.dailyMessages++;
+                this.hourlyMessages++;
+                
+                // Mark as seen first
+                await chat.sendSeen();
+                
+                // Random delay before typing
+                await new Promise(resolve => setTimeout(resolve, Math.random() * 1000 + 500));
+                
+                // Show typing indicator
+                await chat.sendStateTyping();
+                
+                // Random typing duration
+                const typingDuration = Math.floor(
+                    Math.random() * (TYPING_DURATION.MAX - TYPING_DURATION.MIN) + TYPING_DURATION.MIN
+                );
+                await new Promise(resolve => setTimeout(resolve, typingDuration));
+                
+                // Process message
+                await handler();
+                
+            } catch (error) {
+                console.error(chalk.red(`Error processing message for user ${userId}:`), error);
+            } finally {
+                this.activeChatCount--;
+                userQueue.shift(); // Remove processed message
+                
+                // Add delay between messages
+                if (userQueue.length > 0) {
+                    await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
+                }
+            }
+        }
+        
+        // Clear queue for user if empty
+        if (userQueue.length === 0) {
+            this.queue.delete(userId);
+            this.messageCount.delete(userId);
+        }
+    }
+}
+
+// Instantiate message queue
+const messageQueue = new MessageQueue();
+
+// Instantiate new WhatsApp client with persistent session
+const client = new Client({
+    authStrategy: new LocalAuth({
+        clientId: 'whatsapp-bot',
+        dataPath: SESSION_DIR
+    }),
+    puppeteer: {
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true
+    },
+    restartOnAuthFail: true
+});
+
+// Connection status tracking
+let isConnected = false;
+let reconnectAttempts = 0;
+
+// Connection state management
+const handleConnectionState = (state) => {
+    console.log(chalk.yellow(`Connection state: ${state}`));
+    isConnected = state === 'CONNECTED';
+};
+
+// Implement reconnection logic
+const reconnect = async () => {
+    if (reconnectAttempts < MAX_RETRIES) {
+        reconnectAttempts++;
+        console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
+        
+        try {
+            await client.initialize();
+        } catch (error) {
+            console.error(chalk.red('Reconnection failed:'), error);
+            setTimeout(reconnect, RETRY_DELAY);
+        }
+    } else {
+        console.error(chalk.red('Max reconnection attempts reached. Please restart the application.'));
+        process.exit(1);
+    }
+};
+
+// QR code event handler
+client.on('qr', (qr) => {
+    console.clear();
+    console.log('\n1. Open WhatsApp on your phone\n2. Tap Menu or Settings and select WhatsApp Web\n3. Point your phone to this screen to capture the code\n');
+    qrcode.generate(qr, { small: true });
+});
+
+// Authentication event handlers
+client.on('authenticated', () => {
+    console.log(chalk.green('WhatsApp authentication successful!\n'));
+    reconnectAttempts = 0;
+    handleConnectionState('AUTHENTICATED');
+});
+
+client.on('auth_failure', async (message) => {
+    console.error(chalk.red('WHATSAPP AUTHENTICATION FAILURE:'), message);
+    handleConnectionState('AUTH_FAILURE');
+    await reconnect();
+});
+
+// Ready event handler
+client.on('ready', () => {
+    isConnected = true;
+    handleConnectionState('CONNECTED');
+    console.log(chalk.green('Whatbot is ready and connected!\n'));
+    console.log(chalk.greenBright('AI activated. Listening for messages...\n'));
+});
+
+// Disconnection handler
+client.on('disconnected', async (reason) => {
+    console.log(chalk.red('Client disconnected:'), reason);
+    isConnected = false;
+    handleConnectionState('DISCONNECTED');
+    await reconnect();
+});
+
+// Message handler with retry mechanism
+client.on('message', async (message) => {
+    if (!isConnected) {
+        console.log(chalk.yellow('Message received while disconnected, attempting to reconnect...'));
+        return;
+    }
+
+    try {
+        // Ignore group messages
+        const chat = await message.getChat();
+        if (chat.isGroup) return;
+
+        // Log incoming message
+        console.log(chalk.cyan('Incoming message:'), message.body);
+
+        // Add message to queue
+        await messageQueue.addToQueue(chat, message, async () => {
+            // API call with retry mechanism
+            let attempt = 0;
+            while (attempt < MAX_RETRIES) {
+                try {
+                    const response = await axios.get(
+                        `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
+                        {
+                            params: {
+                                input: message.body,
+                                imgUrl: '',
+                                APiKey: `okeymeta-${message.from}`
+                            },
+                            timeout: 90000
+                        }
+                    );
+
+                    if (response.data?.response) {
+                        const responseText = response.data.response.trim();
+                        await client.sendMessage(message.from, responseText);
+                        console.log(chalk.blueBright('Response sent:'), responseText);
+                        break;
+                    }
+                    
+                    throw new Error('Invalid API response');
+                } catch (error) {
+                    attempt++;
+                    console.error(chalk.red(`API attempt ${attempt} failed:`), error.message);
+                    if (attempt === MAX_RETRIES) {
+                        await client.sendMessage(
+                            message.from,
+                            "I'm having trouble processing your message right now. Please try again in a moment."
+                        );
+                    } else {
+                        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        console.error(chalk.red('Message handling error:'), error);
+        handleConnectionState('ERROR');
+    }
+});
+
+// Initialize client with connection state handling
+console.log('Starting WhatsApp client...\n');
+client.initialize()
+    .then(() => handleConnectionState('INITIALIZING'))
+    .catch(async (error) => {
+        console.error(chalk.red('Initialization failed:'), error);
+        handleConnectionState('INITIALIZATION_FAILED');
+        await reconnect();
+    });
+
+// Graceful shutdown
+const shutdown = async () => {
+    console.log(chalk.yellow('\nShutting down...'));
+    try {
+        handleConnectionState('SHUTTING_DOWN');
+        await client.destroy();
+        console.log(chalk.green('Successfully logged out and cleaned up.'));
+    } catch (error) {
+        console.error(chalk.red('Error during shutdown:'), error);
+        handleConnectionState('SHUTDOWN_ERROR');
+    }
+    process.exit(0);
+};
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

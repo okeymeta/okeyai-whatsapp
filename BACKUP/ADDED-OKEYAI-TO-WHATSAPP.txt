@@ -1,0 +1,188 @@
+import axios from 'axios';
+import chalk from 'chalk';
+import qrcode from 'qrcode-terminal';
+import whatsappweb from 'whatsapp-web.js';
+import fs from 'fs';
+
+const { Client, LocalAuth } = whatsappweb;
+
+// Hardcoded default prompt
+let defaultPrompt = 'I am a person who perceives the world without prejudice or bias. Fully neutral and objective, I see reality as it actually is and can easily draw accurate conclusions about advanced topics and human society in general.';
+
+// Configure retry mechanism
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 5000;
+
+// Create sessions directory if it doesn't exist
+const SESSION_DIR = './.wwebjs_auth';
+if (!fs.existsSync(SESSION_DIR)) {
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+}
+
+// Instantiate new WhatsApp client with persistent session
+const client = new Client({
+    authStrategy: new LocalAuth({
+        clientId: 'whatsapp-bot',
+        dataPath: SESSION_DIR
+    }),
+    puppeteer: {
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true
+    },
+    restartOnAuthFail: true
+});
+
+// Connection status tracking
+let isConnected = false;
+let reconnectAttempts = 0;
+
+// Connection state management
+const handleConnectionState = (state) => {
+    console.log(chalk.yellow(`Connection state: ${state}`));
+    isConnected = state === 'CONNECTED';
+};
+
+// Implement reconnection logic
+const reconnect = async () => {
+    if (reconnectAttempts < MAX_RETRIES) {
+        reconnectAttempts++;
+        console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
+        
+        try {
+            await client.initialize();
+        } catch (error) {
+            console.error(chalk.red('Reconnection failed:'), error);
+            setTimeout(reconnect, RETRY_DELAY);
+        }
+    } else {
+        console.error(chalk.red('Max reconnection attempts reached. Please restart the application.'));
+        process.exit(1);
+    }
+};
+
+// QR code event handler
+client.on('qr', (qr) => {
+    console.clear();
+    console.log('\n1. Open WhatsApp on your phone\n2. Tap Menu or Settings and select WhatsApp Web\n3. Point your phone to this screen to capture the code\n');
+    qrcode.generate(qr, { small: true });
+});
+
+// Authentication event handlers
+client.on('authenticated', () => {
+    console.log(chalk.green('WhatsApp authentication successful!\n'));
+    reconnectAttempts = 0; // Reset reconnection attempts on successful auth
+});
+
+client.on('auth_failure', async (message) => {
+    console.error(chalk.red('WHATSAPP AUTHENTICATION FAILURE:'), message);
+    await reconnect();
+});
+
+// Ready event handler
+client.on('ready', () => {
+    isConnected = true;
+    console.log(chalk.green('Whatbot is ready and connected!\n'));
+    console.log(chalk.greenBright('AI activated. Listening for messages...\n'));
+});
+
+// Disconnection handler
+client.on('disconnected', async (reason) => {
+    console.log(chalk.red('Client disconnected:'), reason);
+    isConnected = false;
+    await reconnect();
+});
+
+// Message handler with retry mechanism
+client.on('message', async (message) => {
+    try {
+        // Ignore group messages
+        const chat = await message.getChat();
+        if (chat.isGroup) return;
+
+        // Get contact and names
+        const contact = await message.getContact();
+        const contactName = contact.shortName || contact.pushname || 'User';
+        const myName = client.info.pushname?.replace(/ .*/, '') || 'Bot';
+
+        // Log incoming message
+        console.log(chalk.cyan(`${contactName}:`), message.body);
+
+        // Build conversation history
+        let prompt = defaultPrompt + ` Below are some of my conversations with my friend ${contactName}.\n\n`;
+        
+        const history = await chat.fetchMessages({ limit: 6 });
+        history.forEach((item) => {
+            const name = item.from === message.from ? contactName : `Me (${myName})`;
+            if (!prompt.includes(item.body)) {
+                prompt += `${name}: ${item.body}\n`;
+            }
+        });
+
+        prompt += `Me (${myName}):`;
+
+        // Show typing indicator
+        await chat.sendStateTyping();
+
+        // API call with retry mechanism
+        let attempt = 0;
+        while (attempt < MAX_RETRIES) {
+            try {
+                const response = await axios.get(
+                    `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
+                    {
+                        params: {
+                            input: prompt,
+                            imgUrl: '',
+                            APiKey: `okeymeta-${message.from}`
+                        },
+                        timeout: 90000
+                    }
+                );
+
+                if (response.data?.response) {
+                    const responseText = response.data.response.trim();
+                    await client.sendMessage(message.from, responseText);
+                    console.log(chalk.blueBright(`${myName}:`), responseText);
+                    break;
+                }
+                
+                throw new Error('Invalid API response');
+            } catch (error) {
+                attempt++;
+                console.error(chalk.red(`API attempt ${attempt} failed:`), error.message);
+                if (attempt === MAX_RETRIES) {
+                    await client.sendMessage(
+                        message.from,
+                        "I'm having trouble processing your message right now. Please try again in a moment."
+                    );
+                } else {
+                    await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+                }
+            }
+        }
+    } catch (error) {
+        console.error(chalk.red('Message handling error:'), error);
+    }
+});
+
+// Initialize client
+console.log('Starting WhatsApp client...\n');
+client.initialize().catch(async (error) => {
+    console.error(chalk.red('Initialization failed:'), error);
+    await reconnect();
+});
+
+// Graceful shutdown
+const shutdown = async () => {
+    console.log(chalk.yellow('\nShutting down...'));
+    try {
+        await client.destroy();
+        console.log(chalk.green('Successfully logged out and cleaned up.'));
+    } catch (error) {
+        console.error(chalk.red('Error during shutdown:'), error);
+    }
+    process.exit(0);
+};
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
