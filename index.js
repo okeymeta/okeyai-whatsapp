@@ -27,23 +27,21 @@ const RESTART_DELAY = 5000; // 5 seconds delay before restart
 const CONNECTION_CHECK_INTERVAL = 60000; // Check connection every minute
 const SESSION_CLEANUP_INTERVAL = 3600000; // Cleanup every hour
 
-// Add new constants
+// Update PUPPETEER_OPTIONS
 const PUPPETEER_OPTIONS = {
     args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--window-size=1920x1080',
+        '--disable-software-rasterizer',
         '--disable-web-security',
-        '--ignore-certificate-errors',
-        '--allow-running-insecure-content'
+        '--no-first-run',
+        '--single-process'
     ],
-    headless: true,
-    timeout: 0,
-    executablePath: process.env.CHROME_BIN || null,
-    ignoreDefaultArgs: ['--disable-extensions']
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
+    headless: 'new',
+    timeout: 0
 };
 
 // Create sessions directory if it doesn't exist
@@ -381,12 +379,16 @@ const reconnect = async () => {
         
         try {
             if (client.pupPage) {
-                await client.pupPage.close();
+                try {
+                    await client.pupPage.close().catch(() => {});
+                } catch (e) {}
             }
             if (client.pupBrowser) {
-                await client.pupBrowser.close();
+                try {
+                    await client.pupBrowser.close().catch(() => {});
+                } catch (e) {}
             }
-            await client.destroy();
+            
             await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * 2));
             await client.initialize();
         } catch (error) {
