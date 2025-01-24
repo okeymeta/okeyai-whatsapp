@@ -16,15 +16,75 @@ const { Client, LocalAuth, MessageMedia } = whatsappweb;
 process.env.PORT || 3000; // This satisfies Render's port requirement without needing a server
 
 // Add basic HTTP server
-const PORT = process.env.PORT || 3000;
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('WhatsApp Bot is running\n');
-});
+const DEFAULT_PORT = 3000;
+let PORT;
 
-server.listen(PORT, () => {
-    console.log(chalk.blue(`HTTP server running on port ${PORT}`));
-});
+// Function to find an available port
+const findAvailablePort = async (startPort) => {
+    return new Promise((resolve) => {
+        const server = http.createServer();
+        server.listen(startPort, () => {
+            const port = server.address().port;
+            server.close(() => resolve(port));
+        });
+        server.on('error', () => {
+            resolve(findAvailablePort(startPort + 1));
+        });
+    });
+};
+
+// Initialize server with dynamic port
+const initServer = async () => {
+    // Try using the PORT from environment first
+    PORT = process.env.PORT ? parseInt(process.env.PORT) : DEFAULT_PORT;
+    
+    // If environment port is not available, find an open port
+    if (!process.env.PORT) {
+        PORT = await findAvailablePort(PORT);
+    }
+
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('WhatsApp Bot is running\n');
+    });
+
+    server.listen(PORT, () => {
+        console.log(chalk.blue(`HTTP server running on port ${PORT}`));
+    });
+
+    // Add error handler
+    server.on('error', (err) => {
+        console.error(chalk.red('Server error:'), err);
+        if (err.code === 'EADDRINUSE') {
+            console.log(chalk.yellow(`Port ${PORT} is busy, trying another port...`));
+            setTimeout(() => {
+                server.close();
+                initServer();
+            }, 1000);
+        }
+    });
+
+    return server;
+};
+
+// Initialize server before starting the WhatsApp client
+const startApplication = async () => {
+    try {
+        const server = await initServer();
+        
+        // Start WhatsApp client only after server is running
+        console.log('Starting WhatsApp client...\n');
+        await client.initialize();
+        handleConnectionState('INITIALIZING');
+    } catch (error) {
+        console.error(chalk.red('Startup error:'), error);
+        handleConnectionState('INITIALIZATION_FAILED');
+        await reconnect();
+    }
+};
+
+// Replace the original client initialization with this call
+startApplication();
 
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
