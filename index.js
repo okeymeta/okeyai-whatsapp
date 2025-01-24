@@ -15,37 +15,65 @@ const { Client, LocalAuth, MessageMedia } = whatsappweb;
 // Remove express-related code and keep environment variable
 process.env.PORT || 3000; // This satisfies Render's port requirement without needing a server
 
-// Add basic HTTP server
+// Initialize WhatsApp client first, before server code
+const client = new Client({
+    authStrategy: new LocalAuth({
+        clientId: 'whatsapp-bot',
+        dataPath: SESSION_DIR
+    }),
+    puppeteer: {
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu',
+            '--aggressive-cache-discard',
+            '--disable-cache',
+            '--disable-application-cache',
+            '--disable-offline-load-stale-cache',
+            '--disk-cache-size=0',
+            '--disable-background-networking',
+            '--disable-default-apps',
+            '--disable-extensions',
+            '--disable-sync',
+            '--disable-translate',
+            '--hide-scrollbars',
+            '--metrics-recording-only',
+            '--mute-audio',
+            '--no-first-run',
+            '--safebrowsing-disable-auto-update'
+        ],
+        timeout: 30000,
+        defaultViewport: null,
+        handleSIGINT: false,
+        handleSIGTERM: false
+    },
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 10000
+});
+
+// Move server code after client initialization but before starting anything
 const DEFAULT_PORT = 3000;
 let PORT;
+let serverInstance;
 
-// Function to find an available port
-const findAvailablePort = async (startPort) => {
-    return new Promise((resolve) => {
-        const server = http.createServer();
-        server.listen(startPort, () => {
-            const port = server.address().port;
-            server.close(() => resolve(port));
+// Modify startup sequence
+const startServices = async () => {
+    console.log(chalk.yellow('Starting services...\n'));
+    
+    try {
+        // Start HTTP server first
+        PORT = process.env.PORT ? parseInt(process.env.PORT) : DEFAULT_PORT;
+        
+        const server = http.createServer((req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('WhatsApp Bot is running\n');
         });
-        server.on('error', () => {
-            resolve(findAvailablePort(startPort + 1));
-        });
-    });
-};
 
-// Modify the initServer function
-const initServer = async () => {
-    return new Promise((resolve, reject) => {
-        try {
-            // Try using the PORT from environment first
-            PORT = process.env.PORT ? parseInt(process.env.PORT) : DEFAULT_PORT;
-            
-            const server = http.createServer((req, res) => {
-                res.writeHead(200, { 'Content-Type': 'text/plain' });
-                res.end('WhatsApp Bot is running\n');
-            });
-
-            // Handle server errors
+        // Wait for server to start
+        serverInstance = await new Promise((resolve, reject) => {
             server.on('error', (err) => {
                 if (err.code === 'EADDRINUSE') {
                     console.log(chalk.yellow(`Port ${PORT} is busy, trying ${PORT + 1}...`));
@@ -56,7 +84,6 @@ const initServer = async () => {
                 }
             });
 
-            // Only resolve once the server is actually listening
             server.listen(PORT, () => {
                 console.log(chalk.blue(`HTTP server running on port ${PORT}`));
                 if (process.env.PORT) {
@@ -64,40 +91,26 @@ const initServer = async () => {
                 }
                 resolve(server);
             });
-        } catch (error) {
-            reject(error);
-        }
-    });
-};
+        });
 
-// Update the startApplication function to ensure proper order
-const startApplication = async () => {
-    try {
-        // First initialize the HTTP server
-        console.log(chalk.yellow('Initializing HTTP server...'));
-        const server = await initServer();
-        
-        // Wait a moment to ensure server is stable
+        // Small delay to ensure server is stable
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Then start WhatsApp client
+
+        // Now initialize WhatsApp client
         console.log(chalk.yellow('\nStarting WhatsApp client...'));
         await client.initialize();
-        handleConnectionState('INITIALIZING');
         
-        return server;
+        return true;
     } catch (error) {
         console.error(chalk.red('Startup error:'), error);
-        handleConnectionState('INITIALIZATION_FAILED');
         process.exit(1);
     }
 };
 
-// Replace the original initialization code with this
-let serverInstance;
+// Replace the old initialization code with this
 (async () => {
     try {
-        serverInstance = await startApplication();
+        await startServices();
     } catch (error) {
         console.error(chalk.red('Fatal error during startup:'), error);
         process.exit(1);
@@ -469,45 +482,6 @@ class MessageQueue {
 
 // Instantiate message queue
 const messageQueue = new MessageQueue();
-
-// Update client configuration for better performance
-const client = new Client({
-    authStrategy: new LocalAuth({
-        clientId: 'whatsapp-bot',
-        dataPath: SESSION_DIR
-    }),
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--aggressive-cache-discard',
-            '--disable-cache',
-            '--disable-application-cache',
-            '--disable-offline-load-stale-cache',
-            '--disk-cache-size=0',
-            '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-extensions',
-            '--disable-sync',
-            '--disable-translate',
-            '--hide-scrollbars',
-            '--metrics-recording-only',
-            '--mute-audio',
-            '--no-first-run',
-            '--safebrowsing-disable-auto-update'
-        ],
-        timeout: 30000,
-        defaultViewport: null,
-        handleSIGINT: false,
-        handleSIGTERM: false
-    },
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 10000
-});
 
 // Connection status tracking
 let isConnected = false;
