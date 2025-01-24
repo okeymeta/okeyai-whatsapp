@@ -41,7 +41,11 @@ const PERFORMANCE_OPTS = {
     API_TIMEOUT: 5000,
     CACHE_DURATION: 300000,
     MAX_CONCURRENT: 50,
-    QUEUE_CHECK: 100
+    QUEUE_CHECK: 100,
+    // Add rate limiting settings
+    DAILY_LIMIT: 2000,     // 2000 messages per day per instance
+    HOURLY_LIMIT: 200,     // 200 messages per hour
+    USER_HOURLY_LIMIT: 100 // 100 messages per hour per user
 };
 
 // Remove old timing constants and use PERFORMANCE_OPTS instead
@@ -53,6 +57,8 @@ const TYPING_DURATION = {
 const API_TIMEOUT = PERFORMANCE_OPTS.API_TIMEOUT;
 const CACHE_DURATION = PERFORMANCE_OPTS.CACHE_DURATION;
 const MAX_CONCURRENT_CHATS = PERFORMANCE_OPTS.MAX_CONCURRENT;
+const DAILY_MESSAGE_LIMIT = PERFORMANCE_OPTS.DAILY_LIMIT;
+const HOURLY_MESSAGE_LIMIT = PERFORMANCE_OPTS.HOURLY_LIMIT;
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -248,21 +254,6 @@ class MessageQueue {
         this.dailyMessages = 0;
     }
 
-    canProcessMessage() {
-        const now = Date.now();
-        
-        // Reset counters if a day has passed
-        if (now - this.lastReset > 86400000) {
-            this.resetDailyCount();
-            this.resetHourlyCount();
-            this.lastReset = now;
-        }
-
-        return this.activeChatCount < MAX_CONCURRENT_CHATS &&
-               this.dailyMessages < DAILY_MESSAGE_LIMIT &&
-               this.hourlyMessages < HOURLY_MESSAGE_LIMIT;
-    }
-
     async checkUserRateLimit(userId) {
         const now = Date.now();
         const lastMessage = this.userLastMessage.get(userId) || 0;
@@ -274,17 +265,33 @@ class MessageQueue {
             return true;
         }
 
-        // Limit to 50 messages per hour per user
-        if (userCount >= 50) {
+        // Use PERFORMANCE_OPTS for user limits
+        if (userCount >= PERFORMANCE_OPTS.USER_HOURLY_LIMIT) {
             return false;
         }
 
-        // Ensure minimum 3 second gap between messages from same user
-        if (now - lastMessage < 3000) {
+        // Minimum 1 second gap between messages
+        if (now - lastMessage < 1000) {
             return false;
         }
 
         return true;
+    }
+
+    canProcessMessage() {
+        const now = Date.now();
+        
+        // Reset counters if a day has passed
+        if (now - this.lastReset > 86400000) {
+            this.resetDailyCount();
+            this.resetHourlyCount();
+            this.lastReset = now;
+        }
+
+        // Use proper rate limits from PERFORMANCE_OPTS
+        return this.activeChatCount < PERFORMANCE_OPTS.MAX_CONCURRENT &&
+               this.dailyMessages < PERFORMANCE_OPTS.DAILY_LIMIT &&
+               this.hourlyMessages < PERFORMANCE_OPTS.HOURLY_LIMIT;
     }
 
     async addToQueue(chat, message, handler) {
