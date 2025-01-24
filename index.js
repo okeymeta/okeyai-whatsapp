@@ -5,6 +5,7 @@ import whatsappweb from 'whatsapp-web.js';
 import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
+import express from 'express'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -13,17 +14,28 @@ const { Client, LocalAuth, MessageMedia } = whatsappweb;
 
 // Add port configuration
 const PORT = process.env.PORT || 3000;
-const express = require('express');
-const app = express();
+const app = express(); // Move this line up
 
 // Add basic endpoint for health check
 app.get('/', (req, res) => {
-    res.send('WhatsApp Bot Service Running');
+    res.send({
+        status: 'running',
+        uptime: process.uptime(),
+        timestamp: new Date()
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.send({
+        status: isConnected ? 'connected' : 'disconnected',
+        lastReconnectAttempt: reconnectAttempts,
+        uptime: process.uptime()
+    });
 });
 
 // Add server listener
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+const server = app.listen(PORT, () => {
+    console.log(chalk.blue(`Server running on port ${PORT}`));
 });
 
 // Configure retry and rate limiting
@@ -533,6 +545,9 @@ const shutdown = async () => {
     try {
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
+        server.close(() => { // Add this line
+            console.log(chalk.green('Express server closed.')); // Add this line
+        }); // Add this line
         console.log(chalk.green('Successfully logged out and cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
