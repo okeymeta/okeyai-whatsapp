@@ -11,6 +11,21 @@ const Jimp = require('jimp'); // Direct require without destructuring
 
 const { Client, LocalAuth, MessageMedia } = whatsappweb;
 
+// Add port configuration
+const PORT = process.env.PORT || 3000;
+const express = require('express');
+const app = express();
+
+// Add basic endpoint for health check
+app.get('/', (req, res) => {
+    res.send('WhatsApp Bot Service Running');
+});
+
+// Add server listener
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
+
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
