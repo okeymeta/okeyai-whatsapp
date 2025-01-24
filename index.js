@@ -349,11 +349,12 @@ const reconnect = async () => {
 // QR code event handler
 client.on('qr', (qr) => {
     console.clear();
-    console.log('\n1. Open WhatsApp on your phone\n2. Tap Menu or Settings and select WhatsApp Web\n3. Point your phone to this screen to capture the code\n');
+    console.log('\nScan QR Code:\n');
     qrcode.generate(qr, { 
         small: true,
-        scale: 4,
-        margin: 2
+        scale: 1,
+        margin: 0,
+        width: 30
     });
 });
 
