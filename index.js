@@ -5,151 +5,23 @@ import whatsappweb from 'whatsapp-web.js';
 import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
-import http from 'http'; // Add this import
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
 
 const { Client, LocalAuth, MessageMedia } = whatsappweb;
 
-// Remove express-related code and keep environment variable
-process.env.PORT || 3000; // This satisfies Render's port requirement without needing a server
-
-// Initialize WhatsApp client first, before server code
-const client = new Client({
-    authStrategy: new LocalAuth({
-        clientId: 'whatsapp-bot',
-        dataPath: SESSION_DIR
-    }),
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--aggressive-cache-discard',
-            '--disable-cache',
-            '--disable-application-cache',
-            '--disable-offline-load-stale-cache',
-            '--disk-cache-size=0',
-            '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-extensions',
-            '--disable-sync',
-            '--disable-translate',
-            '--hide-scrollbars',
-            '--metrics-recording-only',
-            '--mute-audio',
-            '--no-first-run',
-            '--safebrowsing-disable-auto-update'
-        ],
-        timeout: 30000,
-        defaultViewport: null,
-        handleSIGINT: false,
-        handleSIGTERM: false
-    },
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 10000
-});
-
-// Move server code after client initialization but before starting anything
-const DEFAULT_PORT = 3000;
-let PORT;
-let serverInstance;
-
-// Modify startup sequence
-const startServices = async () => {
-    console.log(chalk.yellow('Starting services...\n'));
-    
-    try {
-        // Start HTTP server first
-        PORT = process.env.PORT ? parseInt(process.env.PORT) : DEFAULT_PORT;
-        
-        const server = http.createServer((req, res) => {
-            res.writeHead(200, { 'Content-Type': 'text/plain' });
-            res.end('WhatsApp Bot is running\n');
-        });
-
-        // Wait for server to start
-        serverInstance = await new Promise((resolve, reject) => {
-            server.on('error', (err) => {
-                if (err.code === 'EADDRINUSE') {
-                    console.log(chalk.yellow(`Port ${PORT} is busy, trying ${PORT + 1}...`));
-                    PORT++;
-                    server.listen(PORT);
-                } else {
-                    reject(err);
-                }
-            });
-
-            server.listen(PORT, () => {
-                console.log(chalk.blue(`HTTP server running on port ${PORT}`));
-                if (process.env.PORT) {
-                    console.log(chalk.blue(`Detected service running on port ${process.env.PORT}`));
-                }
-                resolve(server);
-            });
-        });
-
-        // Small delay to ensure server is stable
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // Now initialize WhatsApp client
-        console.log(chalk.yellow('\nStarting WhatsApp client...'));
-        await client.initialize();
-        
-        return true;
-    } catch (error) {
-        console.error(chalk.red('Startup error:'), error);
-        process.exit(1);
-    }
-};
-
-// Replace the old initialization code with this
-(async () => {
-    try {
-        await startServices();
-    } catch (error) {
-        console.error(chalk.red('Fatal error during startup:'), error);
-        process.exit(1);
-    }
-})();
-
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
+const MESSAGE_QUEUE_INTERVAL = 2000; // Time between messages (2 seconds)
+const TYPING_DURATION = { MIN: 2000, MAX: 4000 }; // Random typing duration between 2-4 seconds
+const MAX_CONCURRENT_CHATS = 15; // Maximum number of simultaneous chats
+const DAILY_MESSAGE_LIMIT = 1000; // Maximum messages per day
+const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
 const BOT_PREFIX = 'okeyai';
 const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
-
-// Performance optimization
-const PERFORMANCE_OPTS = {
-    MESSAGE_DELAY: 0,
-    TYPING_MIN: 0,
-    TYPING_MAX: 100,
-    API_TIMEOUT: 5000,
-    CACHE_DURATION: 300000,
-    MAX_CONCURRENT: 50,
-    QUEUE_CHECK: 100,
-    // Add rate limiting settings
-    DAILY_LIMIT: 2000,     // 2000 messages per day per instance
-    HOURLY_LIMIT: 200,     // 200 messages per hour
-    USER_HOURLY_LIMIT: 100 // 100 messages per hour per user
-};
-
-// Remove old timing constants and use PERFORMANCE_OPTS instead
-const MESSAGE_QUEUE_INTERVAL = PERFORMANCE_OPTS.MESSAGE_DELAY;
-const TYPING_DURATION = { 
-    MIN: PERFORMANCE_OPTS.TYPING_MIN, 
-    MAX: PERFORMANCE_OPTS.TYPING_MAX 
-};
-const API_TIMEOUT = PERFORMANCE_OPTS.API_TIMEOUT;
-const CACHE_DURATION = PERFORMANCE_OPTS.CACHE_DURATION;
-const MAX_CONCURRENT_CHATS = PERFORMANCE_OPTS.MAX_CONCURRENT;
-const DAILY_MESSAGE_LIMIT = PERFORMANCE_OPTS.DAILY_LIMIT;
-const HOURLY_MESSAGE_LIMIT = PERFORMANCE_OPTS.HOURLY_LIMIT;
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -267,58 +139,6 @@ async function sendWhatsAppImage(chat, caption, imageUrl) {
     }
 }
 
-// Add response cache and duration constants
-const messageCache = new Map();
-const CONCURRENT_API_CALLS = 10; // Increase concurrent API calls
-
-// Memory optimization
-const gcInterval = setInterval(() => {
-    try {
-        if (global.gc) {
-            global.gc();
-        }
-    } catch (e) {
-        console.log('Garbage collection not exposed');
-    }
-}, 30000);
-
-// Add API rate limiter
-const apiCallsInProgress = new Set();
-async function makeApiCall(url, params) {
-    const cacheKey = JSON.stringify(params);
-    if (messageCache.has(cacheKey)) {
-        return { data: { response: messageCache.get(cacheKey) } };
-    }
-
-    while (apiCallsInProgress.size >= PERFORMANCE_OPTS.MAX_CONCURRENT) {
-        await new Promise(resolve => setTimeout(resolve, PERFORMANCE_OPTS.QUEUE_CHECK));
-    }
-    
-    const callId = Date.now();
-    apiCallsInProgress.add(callId);
-    
-    try {
-        const response = await axios.get(url, {
-            params,
-            timeout: PERFORMANCE_OPTS.API_TIMEOUT,
-            headers: {
-                'Connection': 'close',
-                'Accept': 'application/json',
-                'Cache-Control': 'no-cache'
-            }
-        });
-        
-        if (response.data?.response) {
-            messageCache.set(cacheKey, response.data.response);
-            setTimeout(() => messageCache.delete(cacheKey), CACHE_DURATION);
-        }
-        
-        return response;
-    } finally {
-        apiCallsInProgress.delete(callId);
-    }
-}
-
 // Message queue and rate limiting
 class MessageQueue {
     constructor() {
@@ -330,7 +150,6 @@ class MessageQueue {
         this.lastReset = Date.now();
         this.userLastMessage = new Map(); // Track last message time per user
         this.userMessageCount = new Map(); // Track message count per user
-        this.processingQueues = new Set();
         
         // Reset counters periodically
         setInterval(() => this.resetHourlyCount(), 3600000); // Reset hourly
@@ -345,6 +164,21 @@ class MessageQueue {
         this.dailyMessages = 0;
     }
 
+    canProcessMessage() {
+        const now = Date.now();
+        
+        // Reset counters if a day has passed
+        if (now - this.lastReset > 86400000) {
+            this.resetDailyCount();
+            this.resetHourlyCount();
+            this.lastReset = now;
+        }
+
+        return this.activeChatCount < MAX_CONCURRENT_CHATS &&
+               this.dailyMessages < DAILY_MESSAGE_LIMIT &&
+               this.hourlyMessages < HOURLY_MESSAGE_LIMIT;
+    }
+
     async checkUserRateLimit(userId) {
         const now = Date.now();
         const lastMessage = this.userLastMessage.get(userId) || 0;
@@ -356,33 +190,17 @@ class MessageQueue {
             return true;
         }
 
-        // Use PERFORMANCE_OPTS for user limits
-        if (userCount >= PERFORMANCE_OPTS.USER_HOURLY_LIMIT) {
+        // Limit to 50 messages per hour per user
+        if (userCount >= 50) {
             return false;
         }
 
-        // Minimum 1 second gap between messages
-        if (now - lastMessage < 1000) {
+        // Ensure minimum 3 second gap between messages from same user
+        if (now - lastMessage < 3000) {
             return false;
         }
 
         return true;
-    }
-
-    canProcessMessage() {
-        const now = Date.now();
-        
-        // Reset counters if a day has passed
-        if (now - this.lastReset > 86400000) {
-            this.resetDailyCount();
-            this.resetHourlyCount();
-            this.lastReset = now;
-        }
-
-        // Use proper rate limits from PERFORMANCE_OPTS
-        return this.activeChatCount < PERFORMANCE_OPTS.MAX_CONCURRENT &&
-               this.dailyMessages < PERFORMANCE_OPTS.DAILY_LIMIT &&
-               this.hourlyMessages < PERFORMANCE_OPTS.HOURLY_LIMIT;
     }
 
     async addToQueue(chat, message, handler) {
@@ -415,13 +233,12 @@ class MessageQueue {
     }
 
     async processQueue(userId) {
-        if (this.processingQueues.has(userId)) return;
-        this.processingQueues.add(userId);
-        
         const userQueue = this.queue.get(userId);
-        while (userQueue && userQueue.length > 0) {
+        
+        while (userQueue.length > 0) {
             if (!this.canProcessMessage()) {
-                await new Promise(resolve => setTimeout(resolve, PERFORMANCE_OPTS.QUEUE_CHECK));
+                // Wait and check again if limits are exceeded
+                await new Promise(resolve => setTimeout(resolve, 5000));
                 continue;
             }
 
@@ -432,56 +249,74 @@ class MessageQueue {
                 this.dailyMessages++;
                 this.hourlyMessages++;
                 
-                // Use proper typing duration
+                // Show typing indicator with smart duration
+                await chat.sendStateTyping();
+                
+                // Smarter typing duration based on message length
                 const typingDuration = Math.min(
-                    Math.max(message.body.length * 25, TYPING_DURATION.MIN),
+                    Math.max(message.body.length * 50, TYPING_DURATION.MIN),
                     TYPING_DURATION.MAX
                 );
-                
-                await chat.sendStateTyping();
                 await new Promise(resolve => setTimeout(resolve, typingDuration));
                 
+                // Process message with response splitting
                 const result = await handler();
                 if (result) {
                     const segments = splitMessage(result);
                     for (const segment of segments) {
                         await chat.sendStateTyping();
+                        await new Promise(resolve => 
+                            setTimeout(resolve, Math.min(segment.length * 50, 3000))
+                        );
                         await client.sendMessage(message.from, segment);
+                        // Add delay between segments
                         if (segments.length > 1) {
-                            await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
+                            await new Promise(resolve => setTimeout(resolve, 1000));
                         }
                     }
                 }
                 
             } catch (error) {
                 console.error(chalk.red(`Error processing message for user ${userId}:`), error);
+                // Add error recovery logic
                 if (error.message.includes('timeout')) {
                     await client.sendMessage(message.from, 
-                        "I'm experiencing a delay. Please try again.");
+                        "I'm experiencing a temporary delay. Please try again in a moment.");
                 }
             } finally {
                 this.activeChatCount--;
-                userQueue.shift();
+                userQueue.shift(); // Remove processed message
                 
-                // Use MESSAGE_QUEUE_INTERVAL for delays
+                // Add delay between messages
                 if (userQueue.length > 0) {
                     await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
                 }
             }
         }
-
-        // Proper cleanup
-        if (userQueue && userQueue.length === 0) {
+        
+        // Clear queue for user if empty
+        if (userQueue.length === 0) {
             this.queue.delete(userId);
             this.messageCount.delete(userId);
-            this.userLastMessage.delete(userId);
-            this.userMessageCount.delete(userId);
         }
     }
 }
 
 // Instantiate message queue
 const messageQueue = new MessageQueue();
+
+// Instantiate new WhatsApp client with persistent session
+const client = new Client({
+    authStrategy: new LocalAuth({
+        clientId: 'whatsapp-bot',
+        dataPath: SESSION_DIR
+    }),
+    puppeteer: {
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true
+    },
+    restartOnAuthFail: true
+});
 
 // Connection status tracking
 let isConnected = false;
@@ -514,13 +349,8 @@ const reconnect = async () => {
 // QR code event handler
 client.on('qr', (qr) => {
     console.clear();
-    console.log('\nScan QR Code:\n');
-    qrcode.generate(qr, { 
-        small: true,
-        scale: 1,
-        margin: 0,
-        width: 30
-    });
+    console.log('\n1. Open WhatsApp on your phone\n2. Tap Menu or Settings and select WhatsApp Web\n3. Point your phone to this screen to capture the code\n');
+    qrcode.generate(qr, { small: true });
 });
 
 // Authentication event handlers
@@ -544,35 +374,6 @@ client.on('ready', () => {
     console.log(chalk.greenBright('OkeyAI activated. Listening for messages...\n'));
     // Store bot start time
     global.botStartTime = Date.now();
-});
-
-// Add connection keep-alive
-let connectionCheckInterval;
-const startConnectionCheck = () => {
-    if (connectionCheckInterval) clearInterval(connectionCheckInterval);
-    connectionCheckInterval = setInterval(async () => {
-        if (!isConnected) {
-            console.log(chalk.yellow('Connection check: Reconnecting...'));
-            try {
-                await client.initialize();
-            } catch (error) {
-                console.error(chalk.red('Connection check failed:'), error);
-            }
-        }
-    }, 15000); // Check every 15 seconds
-};
-
-// Update ready handler
-client.on('ready', () => {
-    isConnected = true;
-    handleConnectionState('CONNECTED');
-    console.log(chalk.green('\nOkeyAI is ready and connected!'));
-    console.log(chalk.greenBright('OkeyAI activated. Listening for messages...'));
-    startConnectionCheck();
-    
-    // Reset message queue on ready
-    messageQueue.queue.clear();
-    messageQueue.processingQueues.clear();
 });
 
 // Disconnection handler
@@ -672,26 +473,21 @@ async function processMessageWithQueue(chat, message, processedContent) {
         ...message,
         body: processedContent
     }, async () => {
-        const cacheKey = processedContent.toLowerCase().trim();
-        if (messageCache.has(cacheKey)) {
-            return messageCache.get(cacheKey);
-        }
-
         try {
-            const response = await makeApiCall(
-                'https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai',
+            const response = await axios.get(
+                `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
                 {
-                    input: processedContent,
-                    imgUrl: '',
-                    APiKey: `okeymeta-${message.from}`
+                    params: {
+                        input: processedContent,
+                        imgUrl: '',
+                        APiKey: `okeymeta-${message.from}`
+                    },
+                    timeout: 90000
                 }
             );
 
             if (response.data?.response) {
-                const result = response.data.response.trim();
-                messageCache.set(cacheKey, result);
-                setTimeout(() => messageCache.delete(cacheKey), CACHE_DURATION);
-                return result;
+                return response.data.response.trim();
             }
             throw new Error('Invalid API response');
         } catch (error) {
@@ -711,18 +507,12 @@ client.initialize()
         await reconnect();
     });
 
-// Update the shutdown function to use serverInstance
+// Graceful shutdown
 const shutdown = async () => {
     console.log(chalk.yellow('\nShutting down...'));
     try {
-        clearInterval(connectionCheckInterval);
-        clearInterval(gcInterval);
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
-        if (serverInstance) {
-            await new Promise(resolve => serverInstance.close(resolve));
-            console.log(chalk.green('HTTP server closed.'));
-        }
         console.log(chalk.green('Successfully logged out and cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
