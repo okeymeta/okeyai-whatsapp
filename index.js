@@ -34,9 +34,10 @@ const PUPPETEER_OPTIONS = {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--disable-software-rasterizer'
+        '--no-first-run'
     ],
-    headless: 'new'
+    headless: true,
+    executablePath: process.env.CHROME_PATH || null
 };
 
 // Create sessions directory if it doesn't exist
