@@ -371,25 +371,56 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
-// Instantiate new WhatsApp client with persistent session
+// Performance optimization
+const PERFORMANCE_OPTS = {
+    MESSAGE_DELAY: 100,
+    TYPING_MIN: 200,
+    TYPING_MAX: 500,
+    API_TIMEOUT: 8000,
+    CACHE_DURATION: 300000, // 5 minutes
+    MAX_CONCURRENT: 30
+};
+
+// Update client configuration for better performance
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'whatsapp-bot',
         dataPath: SESSION_DIR
     }),
     puppeteer: {
+        headless: true,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-gpu',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas'
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu',
+            '--aggressive-cache-discard',
+            '--disable-cache',
+            '--disable-application-cache',
+            '--disable-offline-load-stale-cache',
+            '--disk-cache-size=0',
+            '--disable-background-networking',
+            '--disable-default-apps',
+            '--disable-extensions',
+            '--disable-sync',
+            '--disable-translate',
+            '--hide-scrollbars',
+            '--metrics-recording-only',
+            '--mute-audio',
+            '--no-first-run',
+            '--safebrowsing-disable-auto-update'
         ],
-        headless: true,
-        timeout: 60000
+        timeout: 60000,
+        defaultViewport: { width: 800, height: 600 },
+        handleSIGINT: false,
+        handleSIGTERM: false
     },
     qrMaxRetries: 3,
-    restartOnAuthFail: true
+    restartOnAuthFail: true,
+    takeoverOnConflict: true,
+    authTimeoutMs: 60000,
+    qrQualityOptions: { quality: 0.5 }
 });
 
 // Connection status tracking
@@ -453,6 +484,31 @@ client.on('ready', () => {
     console.log(chalk.greenBright('OkeyAI activated. Listening for messages...\n'));
     // Store bot start time
     global.botStartTime = Date.now();
+});
+
+// Add connection keep-alive
+let connectionCheckInterval;
+const startConnectionCheck = () => {
+    if (connectionCheckInterval) clearInterval(connectionCheckInterval);
+    connectionCheckInterval = setInterval(async () => {
+        if (!isConnected) {
+            console.log(chalk.yellow('Connection check: Reconnecting...'));
+            try {
+                await client.initialize();
+            } catch (error) {
+                console.error(chalk.red('Connection check failed:'), error);
+            }
+        }
+    }, 30000); // Check every 30 seconds
+};
+
+// Update ready handler
+client.on('ready', () => {
+    isConnected = true;
+    handleConnectionState('CONNECTED');
+    console.log(chalk.green('\nOkeyAI is ready and connected!'));
+    console.log(chalk.greenBright('OkeyAI activated. Listening for messages...'));
+    startConnectionCheck();
 });
 
 // Disconnection handler
@@ -595,6 +651,7 @@ client.initialize()
 const shutdown = async () => {
     console.log(chalk.yellow('\nShutting down...'));
     try {
+        clearInterval(connectionCheckInterval);
         clearInterval(gcInterval);
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
