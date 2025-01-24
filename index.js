@@ -33,58 +33,76 @@ const findAvailablePort = async (startPort) => {
     });
 };
 
-// Initialize server with dynamic port
+// Modify the initServer function
 const initServer = async () => {
-    // Try using the PORT from environment first
-    PORT = process.env.PORT ? parseInt(process.env.PORT) : DEFAULT_PORT;
-    
-    // If environment port is not available, find an open port
-    if (!process.env.PORT) {
-        PORT = await findAvailablePort(PORT);
-    }
+    return new Promise((resolve, reject) => {
+        try {
+            // Try using the PORT from environment first
+            PORT = process.env.PORT ? parseInt(process.env.PORT) : DEFAULT_PORT;
+            
+            const server = http.createServer((req, res) => {
+                res.writeHead(200, { 'Content-Type': 'text/plain' });
+                res.end('WhatsApp Bot is running\n');
+            });
 
-    const server = http.createServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('WhatsApp Bot is running\n');
-    });
+            // Handle server errors
+            server.on('error', (err) => {
+                if (err.code === 'EADDRINUSE') {
+                    console.log(chalk.yellow(`Port ${PORT} is busy, trying ${PORT + 1}...`));
+                    PORT++;
+                    server.listen(PORT);
+                } else {
+                    reject(err);
+                }
+            });
 
-    server.listen(PORT, () => {
-        console.log(chalk.blue(`HTTP server running on port ${PORT}`));
-    });
-
-    // Add error handler
-    server.on('error', (err) => {
-        console.error(chalk.red('Server error:'), err);
-        if (err.code === 'EADDRINUSE') {
-            console.log(chalk.yellow(`Port ${PORT} is busy, trying another port...`));
-            setTimeout(() => {
-                server.close();
-                initServer();
-            }, 1000);
+            // Only resolve once the server is actually listening
+            server.listen(PORT, () => {
+                console.log(chalk.blue(`HTTP server running on port ${PORT}`));
+                if (process.env.PORT) {
+                    console.log(chalk.blue(`Detected service running on port ${process.env.PORT}`));
+                }
+                resolve(server);
+            });
+        } catch (error) {
+            reject(error);
         }
     });
-
-    return server;
 };
 
-// Initialize server before starting the WhatsApp client
+// Update the startApplication function to ensure proper order
 const startApplication = async () => {
     try {
+        // First initialize the HTTP server
+        console.log(chalk.yellow('Initializing HTTP server...'));
         const server = await initServer();
         
-        // Start WhatsApp client only after server is running
-        console.log('Starting WhatsApp client...\n');
+        // Wait a moment to ensure server is stable
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Then start WhatsApp client
+        console.log(chalk.yellow('\nStarting WhatsApp client...'));
         await client.initialize();
         handleConnectionState('INITIALIZING');
+        
+        return server;
     } catch (error) {
         console.error(chalk.red('Startup error:'), error);
         handleConnectionState('INITIALIZATION_FAILED');
-        await reconnect();
+        process.exit(1);
     }
 };
 
-// Replace the original client initialization with this call
-startApplication();
+// Replace the original initialization code with this
+let serverInstance;
+(async () => {
+    try {
+        serverInstance = await startApplication();
+    } catch (error) {
+        console.error(chalk.red('Fatal error during startup:'), error);
+        process.exit(1);
+    }
+})();
 
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
@@ -719,7 +737,7 @@ client.initialize()
         await reconnect();
     });
 
-// Graceful shutdown
+// Update the shutdown function to use serverInstance
 const shutdown = async () => {
     console.log(chalk.yellow('\nShutting down...'));
     try {
@@ -727,9 +745,10 @@ const shutdown = async () => {
         clearInterval(gcInterval);
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
-        server.close(() => {
+        if (serverInstance) {
+            await new Promise(resolve => serverInstance.close(resolve));
             console.log(chalk.green('HTTP server closed.'));
-        });
+        }
         console.log(chalk.green('Successfully logged out and cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
