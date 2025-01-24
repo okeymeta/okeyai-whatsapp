@@ -34,12 +34,22 @@ const PUPPETEER_OPTIONS = {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
         '--no-first-run',
         '--no-zygote',
-        '--disable-gpu'
+        '--single-process', // <- important
+        '--disable-extensions',
+        '--disable-web-security',
+        '--disable-features=site-per-process',
+        '--ignore-certificate-errors',
+        '--ignore-certificate-errors-spki-list',
+        '--allow-insecure-localhost'
     ],
     headless: 'new',
-    timeout: 0
+    timeout: 0,
+    protocolTimeout: 30000,
+    defaultViewport: null,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
 };
 
 // Create sessions directory if it doesn't exist
@@ -348,7 +358,8 @@ const client = new Client({
     restartOnAuthFail: true,
     qrMaxRetries: 5,
     takeoverOnConflict: true,
-    takeoverTimeoutMs: 0
+    takeoverTimeoutMs: 0,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36'
 });
 
 // Connection status tracking
@@ -370,19 +381,21 @@ const reconnect = async () => {
         console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
         
         try {
-            // Destroy existing client first
+            // Destroy and cleanup before reconnecting
             await client.destroy();
-            // Wait before trying to reconnect
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-            // Initialize again
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * 2));
+            
+            // Clear session before retrying
+            await fs.promises.rm(SESSION_DIR, { recursive: true, force: true });
+            await fs.promises.mkdir(SESSION_DIR, { recursive: true });
+            
             await client.initialize();
         } catch (error) {
             console.error(chalk.red('Reconnection failed:'), error);
-            // Add exponential backoff
             await new Promise(resolve => 
                 setTimeout(resolve, RETRY_DELAY * Math.pow(2, reconnectAttempts))
             );
-            await reconnect();
+            if (reconnectAttempts < MAX_RETRIES) await reconnect();
         }
     } else {
         console.error(chalk.red('Max reconnection attempts reached. Restarting process...'));
@@ -583,11 +596,22 @@ sessionCleanupTimer = setInterval(cleanupSessions, SESSION_CLEANUP_INTERVAL);
 const initializeClient = async () => {
     try {
         handleConnectionState('INITIALIZING');
+        // Add delay before initialization
+        await new Promise(resolve => setTimeout(resolve, 5000));
         await client.initialize();
         cleanupSessions();
     } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
         handleConnectionState('INITIALIZATION_FAILED');
+        
+        // Clear any existing sessions
+        try {
+            await fs.promises.rm(SESSION_DIR, { recursive: true, force: true });
+            await fs.promises.mkdir(SESSION_DIR, { recursive: true });
+        } catch (cleanupError) {
+            console.error(chalk.red('Session cleanup failed:'), cleanupError);
+        }
+        
         await new Promise(resolve => setTimeout(resolve, RESTART_DELAY));
         await reconnect();
     }
