@@ -5,6 +5,7 @@ import whatsappweb from 'whatsapp-web.js';
 import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
+import http from 'http'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -27,6 +28,7 @@ const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
 const KEEPALIVE_INTERVAL = 30000; // 30 seconds
 const MEMORY_CHECK_INTERVAL = 300000; // 5 minutes
 const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB limit
+const PORT = process.env.PORT || 3000; // Add this line
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -402,6 +404,16 @@ const setupMemoryManagement = () => {
     }, MEMORY_CHECK_INTERVAL);
 };
 
+// Simple HTTP server to keep the process alive
+const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('WhatsApp bot is running!');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(chalk.blue(`HTTP server is listening on port ${PORT}`));
+});
+
 // QR code event handler
 client.on('qr', (qr) => {
     console.clear();
@@ -573,6 +585,7 @@ const shutdown = async () => {
     try {
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
+        server.close(); // Add this line
         console.log(chalk.green('Successfully logged out and cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
