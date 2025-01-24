@@ -30,6 +30,11 @@ const MEMORY_CHECK_INTERVAL = 300000; // 5 minutes
 const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB limit
 const PORT = process.env.PORT || 3000; // Add this line
 
+// Add these new constants after existing constants
+const HEALTH_CHECK_INTERVAL = 25 * 60 * 1000; // 25 minutes
+const PING_INTERVAL = 4 * 60 * 1000; // 4 minutes
+const AUTO_RESTART_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours
+
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
 if (!fs.existsSync(SESSION_DIR)) {
@@ -361,16 +366,21 @@ const reconnect = async () => {
         console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
         
         try {
+            if (client.pupPage) {
+                await client.pupPage.reload().catch(() => {});
+            }
             await client.destroy();
             await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
             await client.initialize();
         } catch (error) {
             console.error(chalk.red('Reconnection failed:'), error);
-            setTimeout(reconnect, RETRY_DELAY * reconnectAttempts);
+            // Exponential backoff
+            const delay = RETRY_DELAY * Math.pow(2, reconnectAttempts - 1);
+            setTimeout(reconnect, delay);
         }
     } else {
-        console.error(chalk.red('Max reconnection attempts reached. Restarting process...'));
-        process.exit(1); // Process manager should restart the application
+        console.error(chalk.red('Max reconnection attempts reached. Forcing restart...'));
+        process.exit(1);
     }
 };
 
@@ -404,10 +414,54 @@ const setupMemoryManagement = () => {
     }, MEMORY_CHECK_INTERVAL);
 };
 
-// Simple HTTP server to keep the process alive
+// Add this function after setupMemoryManagement
+const setupHealthCheck = () => {
+    // Periodically hit our own HTTP endpoint to keep the service active
+    setInterval(() => {
+        try {
+            http.get(`http://0.0.0.0:${PORT}`, (res) => {
+                if (res.statusCode === 200) {
+                    console.log(chalk.blue('Health check passed'));
+                }
+            }).on('error', (err) => {
+                console.error(chalk.red('Health check failed:', err));
+            });
+        } catch (error) {
+            console.error(chalk.red('Health check error:', error));
+        }
+    }, HEALTH_CHECK_INTERVAL);
+
+    // Periodic ping to keep connection alive
+    setInterval(() => {
+        if (isConnected && client.pupPage) {
+            client.sendPresenceAvailable()
+                .catch(err => console.error(chalk.yellow('Presence update failed:', err)));
+        }
+    }, PING_INTERVAL);
+
+    // Auto-restart to prevent memory leaks and keep fresh
+    setInterval(() => {
+        console.log(chalk.yellow('Performing scheduled restart...'));
+        process.exit(0); // Process manager will restart
+    }, AUTO_RESTART_INTERVAL);
+};
+
+// Modify the HTTP server to include a more robust health check
 const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('WhatsApp bot is running!');
+    if (isConnected) {
+        res.writeHead(200);
+        res.end(JSON.stringify({
+            status: 'ok',
+            uptime: process.uptime(),
+            timestamp: Date.now()
+        }));
+    } else {
+        res.writeHead(503);
+        res.end(JSON.stringify({
+            status: 'reconnecting',
+            timestamp: Date.now()
+        }));
+    }
 });
 
 server.listen(PORT, '0.0.0.0', () => {
@@ -572,6 +626,7 @@ client.initialize()
         handleConnectionState('INITIALIZING');
         setupKeepAlive();
         setupMemoryManagement();
+        setupHealthCheck(); // Add this line
     })
     .catch(async (error) => {
         console.error(chalk.red('Initialization failed:'), error);
@@ -596,3 +651,15 @@ const shutdown = async () => {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Add these process error handlers at the end of the file
+process.on('uncaughtException', (err) => {
+    console.error(chalk.red('Uncaught Exception:'), err);
+    // Allow the process to restart cleanly
+    setTimeout(() => process.exit(1), 1000);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error(chalk.red('Unhandled Rejection at:'), promise, 'reason:', reason);
+    // Continue running but log the error
+});
