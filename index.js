@@ -27,17 +27,16 @@ const RESTART_DELAY = 5000; // 5 seconds delay before restart
 const CONNECTION_CHECK_INTERVAL = 60000; // Check connection every minute
 const SESSION_CLEANUP_INTERVAL = 3600000; // Cleanup every hour
 
-// Replace PUPPETEER_OPTIONS with BROWSER_OPTIONS
-const BROWSER_OPTIONS = {
+// Update PUPPETEER_OPTIONS
+const PUPPETEER_OPTIONS = {
     args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--disable-software-rasterizer'
     ],
-    channel: 'chrome',
-    headless: true
+    headless: 'new'
 };
 
 // Create sessions directory if it doesn't exist
@@ -342,20 +341,9 @@ const client = new Client({
         clientId: 'whatsapp-bot',
         dataPath: SESSION_DIR
     }),
-    playwright: {
-        browserName: 'chromium',
-        launchOptions: BROWSER_OPTIONS
-    },
-    webVersion: '2.2346.52',
-    webVersionCache: {
-        type: 'none'
-    },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+    puppeteer: PUPPETEER_OPTIONS,
     restartOnAuthFail: true,
-    qrMaxRetries: 5,
-    authTimeoutMs: 0,
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 0
+    qrMaxRetries: 5
 });
 
 // Connection status tracking
