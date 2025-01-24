@@ -5,6 +5,7 @@ import whatsappweb from 'whatsapp-web.js';
 import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
+import http from 'http'; // Add this import
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -13,6 +14,17 @@ const { Client, LocalAuth, MessageMedia } = whatsappweb;
 
 // Remove express-related code and keep environment variable
 process.env.PORT || 3000; // This satisfies Render's port requirement without needing a server
+
+// Add basic HTTP server
+const PORT = process.env.PORT || 3000;
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('WhatsApp Bot is running\n');
+});
+
+server.listen(PORT, () => {
+    console.log(chalk.blue(`HTTP server running on port ${PORT}`));
+});
 
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
@@ -521,6 +533,9 @@ const shutdown = async () => {
     try {
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
+        server.close(() => {
+            console.log(chalk.green('HTTP server closed.'));
+        });
         console.log(chalk.green('Successfully logged out and cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
