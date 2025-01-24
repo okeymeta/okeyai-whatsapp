@@ -5,7 +5,6 @@ import whatsappweb from 'whatsapp-web.js';
 import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
-import http from 'http'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -23,22 +22,6 @@ const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
 const BOT_PREFIX = 'okeyai';
 const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
-const RESTART_DELAY = 5000; // 5 seconds delay before restart
-const CONNECTION_CHECK_INTERVAL = 60000; // Check connection every minute
-const SESSION_CLEANUP_INTERVAL = 3600000; // Cleanup every hour
-
-// Update PUPPETEER_OPTIONS
-const PUPPETEER_OPTIONS = {
-    args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-first-run'
-    ],
-    headless: true,
-    executablePath: process.env.CHROME_PATH || null
-};
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -322,36 +305,22 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
-// Create a simple HTTP server to keep the service alive
-const PORT = process.env.PORT || 3000;
-const HOST = '0.0.0.0';  // Add this line to explicitly set the host
-
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('WhatsApp Bot Server Running\n');
-});
-
-// Update the listen method to use both HOST and PORT
-server.listen(PORT, HOST, () => {
-    console.log(`HTTP server listening on http://${HOST}:${PORT}`);
-});
-
 // Instantiate new WhatsApp client with persistent session
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'whatsapp-bot',
         dataPath: SESSION_DIR
     }),
-    puppeteer: PUPPETEER_OPTIONS,
-    restartOnAuthFail: true,
-    qrMaxRetries: 5
+    puppeteer: {
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true
+    },
+    restartOnAuthFail: true
 });
 
 // Connection status tracking
 let isConnected = false;
 let reconnectAttempts = 0;
-let connectionCheckTimer;
-let sessionCleanupTimer;
 
 // Connection state management
 const handleConnectionState = (state) => {
@@ -366,27 +335,13 @@ const reconnect = async () => {
         console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
         
         try {
-            // More graceful cleanup
-            if (client.pupPage) {
-                await client.pupPage.close().catch(() => {});
-            }
-            if (client.browser) {
-                await client.browser.close().catch(() => {});
-            }
-            
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * 2));
             await client.initialize();
         } catch (error) {
             console.error(chalk.red('Reconnection failed:'), error);
-            if (reconnectAttempts < MAX_RETRIES) {
-                await new Promise(resolve => 
-                    setTimeout(resolve, RETRY_DELAY * Math.pow(2, reconnectAttempts))
-                );
-                await reconnect();
-            }
+            setTimeout(reconnect, RETRY_DELAY);
         }
     } else {
-        console.error(chalk.red('Max reconnection attempts reached. Restarting...'));
+        console.error(chalk.red('Max reconnection attempts reached. Please restart the application.'));
         process.exit(1);
     }
 };
@@ -427,11 +382,6 @@ client.on('disconnected', async (reason) => {
     isConnected = false;
     handleConnectionState('DISCONNECTED');
     await reconnect();
-});
-
-// Add this new event handler
-client.on('loading_screen', (percent, message) => {
-    console.log(chalk.blue('LOADING SCREEN:', percent, message));
 });
 
 // Message handler with retry mechanism
@@ -547,69 +497,22 @@ async function processMessageWithQueue(chat, message, processedContent) {
     });
 }
 
-// Add this function after other utility functions
-const cleanupSessions = () => {
-    try {
-        const files = fs.readdirSync(SESSION_DIR);
-        const now = Date.now();
-        files.forEach(file => {
-            const filePath = `${SESSION_DIR}/${file}`;
-            const stats = fs.statSync(filePath);
-            // Remove files older than 7 days
-            if (now - stats.mtimeMs > 7 * 24 * 60 * 60 * 1000) {
-                fs.unlinkSync(filePath);
-            }
-        });
-    } catch (error) {
-        console.error(chalk.red('Session cleanup error:'), error);
-    }
-};
-
-// Add this function after cleanupSessions
-const checkConnection = async () => {
-    if (!isConnected && reconnectAttempts < MAX_RETRIES) {
-        console.log(chalk.yellow('Connection check: Attempting to reconnect...'));
-        await reconnect();
-    }
-};
-
 // Initialize client with connection state handling
 console.log('Starting WhatsApp client...\n');
-
-// Start periodic connection checks and session cleanup
-connectionCheckTimer = setInterval(checkConnection, CONNECTION_CHECK_INTERVAL);
-sessionCleanupTimer = setInterval(cleanupSessions, SESSION_CLEANUP_INTERVAL);
-
-// Initialize with better error handling
-const initializeClient = async () => {
-    try {
-        handleConnectionState('INITIALIZING');
-        await client.initialize();
-        cleanupSessions();
-    } catch (error) {
+client.initialize()
+    .then(() => handleConnectionState('INITIALIZING'))
+    .catch(async (error) => {
         console.error(chalk.red('Initialization failed:'), error);
         handleConnectionState('INITIALIZATION_FAILED');
-        await new Promise(resolve => setTimeout(resolve, RESTART_DELAY));
         await reconnect();
-    }
-};
+    });
 
-initializeClient();
-
-// Modify the shutdown function to clear intervals
+// Graceful shutdown
 const shutdown = async () => {
     console.log(chalk.yellow('\nShutting down...'));
     try {
-        // Clear intervals
-        clearInterval(connectionCheckTimer);
-        clearInterval(sessionCleanupTimer);
-        
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
-        
-        // Cleanup sessions before exit
-        cleanupSessions();
-        
         console.log(chalk.green('Successfully logged out and cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
@@ -620,11 +523,3 @@ const shutdown = async () => {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
-
-// Add error event handler
-client.on('error', async (error) => {
-    console.error(chalk.red('Client Error:'), error);
-    if (error.message.includes('Protocol error') || error.message.includes('Target closed')) {
-        await reconnect();
-    }
-});
