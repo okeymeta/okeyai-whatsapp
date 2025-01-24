@@ -34,12 +34,16 @@ const PUPPETEER_OPTIONS = {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--window-size=1920x1080',
+        '--disable-web-security',
+        '--ignore-certificate-errors',
+        '--allow-running-insecure-content'
     ],
-    headless: 'new',
-    timeout: 0
+    headless: true,
+    timeout: 0,
+    executablePath: process.env.CHROME_BIN || null,
+    ignoreDefaultArgs: ['--disable-extensions']
 };
 
 // Create sessions directory if it doesn't exist
@@ -345,8 +349,14 @@ const client = new Client({
         dataPath: SESSION_DIR
     }),
     puppeteer: PUPPETEER_OPTIONS,
+    webVersion: '2.2346.52',
+    webVersionCache: {
+        type: 'none'
+    },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
     restartOnAuthFail: true,
     qrMaxRetries: 5,
+    authTimeoutMs: 0,
     takeoverOnConflict: true,
     takeoverTimeoutMs: 0
 });
@@ -370,23 +380,29 @@ const reconnect = async () => {
         console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
         
         try {
-            // Destroy existing client first
+            if (client.pupPage) {
+                await client.pupPage.close();
+            }
+            if (client.pupBrowser) {
+                await client.pupBrowser.close();
+            }
             await client.destroy();
-            // Wait before trying to reconnect
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-            // Initialize again
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * 2));
             await client.initialize();
         } catch (error) {
             console.error(chalk.red('Reconnection failed:'), error);
-            // Add exponential backoff
-            await new Promise(resolve => 
-                setTimeout(resolve, RETRY_DELAY * Math.pow(2, reconnectAttempts))
-            );
-            await reconnect();
+            if (reconnectAttempts < MAX_RETRIES) {
+                await new Promise(resolve => 
+                    setTimeout(resolve, RETRY_DELAY * Math.pow(2, reconnectAttempts))
+                );
+                await reconnect();
+            } else {
+                console.error(chalk.red('Max reconnection attempts reached. Exiting...'));
+                process.exit(1);
+            }
         }
     } else {
-        console.error(chalk.red('Max reconnection attempts reached. Restarting process...'));
-        process.exit(1); // Process manager should restart the application
+        process.exit(1);
     }
 };
 
@@ -619,3 +635,11 @@ const shutdown = async () => {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Add error event handler
+client.on('error', async (error) => {
+    console.error(chalk.red('Client Error:'), error);
+    if (error.message.includes('Protocol error') || error.message.includes('Target closed')) {
+        await reconnect();
+    }
+});
