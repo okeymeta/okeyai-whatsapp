@@ -14,8 +14,8 @@ const { Client, LocalAuth, MessageMedia } = whatsappweb;
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
-const MESSAGE_QUEUE_INTERVAL = 2000; // Time between messages (2 seconds)
-const TYPING_DURATION = { MIN: 2000, MAX: 4000 }; // Random typing duration between 2-4 seconds
+const MESSAGE_QUEUE_INTERVAL = 1000; // Reduced from 2000 to 1000ms
+const TYPING_DURATION = { MIN: 500, MAX: 1500 }; // Reduced from 2000-4000 to 500-1500ms
 const MAX_CONCURRENT_CHATS = 15; // Maximum number of simultaneous chats
 const DAILY_MESSAGE_LIMIT = 1000; // Maximum messages per day
 const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
@@ -80,8 +80,9 @@ const splitMessage = (text) => {
 
 // Add new utility function for image generation
 const generateImage = async (prompt) => {
+    const timestamp = Date.now();
     const encodedPrompt = encodeURIComponent(prompt);
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=flux-pro&nologo=true&enhance=true&private=true`;
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=flux-pro&nologo=true&enhance=true&private=true&seed=${timestamp}`;
     
     // Pre-fetch image to ensure it's ready
     await axios.head(imageUrl);
@@ -243,7 +244,7 @@ class MessageQueue {
         while (userQueue.length > 0) {
             if (!this.canProcessMessage()) {
                 // Wait and check again if limits are exceeded
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Reduced from 5000 to 2000ms
                 continue;
             }
 
@@ -259,7 +260,7 @@ class MessageQueue {
                 
                 // Smarter typing duration based on message length
                 const typingDuration = Math.min(
-                    Math.max(message.body.length * 50, TYPING_DURATION.MIN),
+                    Math.max(message.body.length * 25, TYPING_DURATION.MIN), // Reduced multiplier from 50 to 25
                     TYPING_DURATION.MAX
                 );
                 await new Promise(resolve => setTimeout(resolve, typingDuration));
@@ -271,12 +272,12 @@ class MessageQueue {
                     for (const segment of segments) {
                         await chat.sendStateTyping();
                         await new Promise(resolve => 
-                            setTimeout(resolve, Math.min(segment.length * 50, 3000))
+                            setTimeout(resolve, Math.min(segment.length * 25, 1500)) // Reduced from 3000 to 1500ms
                         );
                         await client.sendMessage(message.from, segment);
                         // Add delay between segments
                         if (segments.length > 1) {
-                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            await new Promise(resolve => setTimeout(resolve, 500)); // Reduced from 1000 to 500ms
                         }
                     }
                 }
@@ -537,7 +538,7 @@ async function processMessageWithQueue(chat, message, processedContent) {
                         imgUrl: '',
                         APiKey: `okeymeta-${message.from}`
                     },
-                    timeout: 90000
+                    timeout: 45000 // Reduced from 90000 to 45000ms
                 }
             );
 
