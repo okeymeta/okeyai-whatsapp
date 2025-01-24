@@ -29,14 +29,15 @@ server.listen(PORT, () => {
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
-const MESSAGE_QUEUE_INTERVAL = 2000; // Time between messages (2 seconds)
-const TYPING_DURATION = { MIN: 2000, MAX: 4000 }; // Random typing duration between 2-4 seconds
-const MAX_CONCURRENT_CHATS = 15; // Maximum number of simultaneous chats
-const DAILY_MESSAGE_LIMIT = 1000; // Maximum messages per day
-const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
+const MESSAGE_QUEUE_INTERVAL = 1000; // Optimize all timing constants
+const TYPING_DURATION = { MIN: 500, MAX: 2000 }; // Optimize all timing constants
+const MAX_CONCURRENT_CHATS = 25; // Optimize all timing constants
+const DAILY_MESSAGE_LIMIT = 1000; // Optimize all timing constants
+const HOURLY_MESSAGE_LIMIT = 100; // Optimize all timing constants
 const BOT_PREFIX = 'okeyai';
 const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
+const API_TIMEOUT = 15000; // Optimize all timing constants
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -154,6 +155,59 @@ async function sendWhatsAppImage(chat, caption, imageUrl) {
     }
 }
 
+// Add response cache and duration constants
+const messageCache = new Map();
+const CACHE_DURATION = 60000; // 1 minute cache
+const CONCURRENT_API_CALLS = 10; // Increase concurrent API calls
+
+// Memory optimization
+const gcInterval = setInterval(() => {
+    try {
+        if (global.gc) {
+            global.gc();
+        }
+    } catch (e) {
+        console.log('Garbage collection not exposed');
+    }
+}, 30000);
+
+// Add API rate limiter
+const apiCallsInProgress = new Set();
+async function makeApiCall(url, params) {
+    const cacheKey = JSON.stringify(params);
+    if (messageCache.has(cacheKey)) {
+        return { data: { response: messageCache.get(cacheKey) } };
+    }
+
+    while (apiCallsInProgress.size >= CONCURRENT_API_CALLS) {
+        await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
+    }
+    
+    const callId = Date.now();
+    apiCallsInProgress.add(callId);
+    
+    try {
+        const response = await axios.get(url, {
+            params,
+            timeout: API_TIMEOUT,
+            headers: {
+                'Connection': 'close',
+                'Accept': 'application/json',
+                'Cache-Control': 'no-cache'
+            }
+        });
+        
+        if (response.data?.response) {
+            messageCache.set(cacheKey, response.data.response);
+            setTimeout(() => messageCache.delete(cacheKey), CACHE_DURATION);
+        }
+        
+        return response;
+    } finally {
+        apiCallsInProgress.delete(callId);
+    }
+}
+
 // Message queue and rate limiting
 class MessageQueue {
     constructor() {
@@ -165,6 +219,7 @@ class MessageQueue {
         this.lastReset = Date.now();
         this.userLastMessage = new Map(); // Track last message time per user
         this.userMessageCount = new Map(); // Track message count per user
+        this.processingQueues = new Set();
         
         // Reset counters periodically
         setInterval(() => this.resetHourlyCount(), 3600000); // Reset hourly
@@ -248,12 +303,13 @@ class MessageQueue {
     }
 
     async processQueue(userId) {
-        const userQueue = this.queue.get(userId);
+        if (this.processingQueues.has(userId)) return;
+        this.processingQueues.add(userId);
         
-        while (userQueue.length > 0) {
+        const userQueue = this.queue.get(userId);
+        while (userQueue && userQueue.length > 0) {
             if (!this.canProcessMessage()) {
-                // Wait and check again if limits are exceeded
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
                 continue;
             }
 
@@ -264,55 +320,50 @@ class MessageQueue {
                 this.dailyMessages++;
                 this.hourlyMessages++;
                 
-                // Show typing indicator with smart duration
-                await chat.sendStateTyping();
-                
-                // Smarter typing duration based on message length
+                // Use proper typing duration
                 const typingDuration = Math.min(
-                    Math.max(message.body.length * 50, TYPING_DURATION.MIN),
+                    Math.max(message.body.length * 25, TYPING_DURATION.MIN),
                     TYPING_DURATION.MAX
                 );
+                
+                await chat.sendStateTyping();
                 await new Promise(resolve => setTimeout(resolve, typingDuration));
                 
-                // Process message with response splitting
                 const result = await handler();
                 if (result) {
                     const segments = splitMessage(result);
                     for (const segment of segments) {
                         await chat.sendStateTyping();
-                        await new Promise(resolve => 
-                            setTimeout(resolve, Math.min(segment.length * 50, 3000))
-                        );
                         await client.sendMessage(message.from, segment);
-                        // Add delay between segments
                         if (segments.length > 1) {
-                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
                         }
                     }
                 }
                 
             } catch (error) {
                 console.error(chalk.red(`Error processing message for user ${userId}:`), error);
-                // Add error recovery logic
                 if (error.message.includes('timeout')) {
                     await client.sendMessage(message.from, 
-                        "I'm experiencing a temporary delay. Please try again in a moment.");
+                        "I'm experiencing a delay. Please try again.");
                 }
             } finally {
                 this.activeChatCount--;
-                userQueue.shift(); // Remove processed message
+                userQueue.shift();
                 
-                // Add delay between messages
+                // Use MESSAGE_QUEUE_INTERVAL for delays
                 if (userQueue.length > 0) {
                     await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
                 }
             }
         }
-        
-        // Clear queue for user if empty
-        if (userQueue.length === 0) {
+
+        // Proper cleanup
+        if (userQueue && userQueue.length === 0) {
             this.queue.delete(userId);
             this.messageCount.delete(userId);
+            this.userLastMessage.delete(userId);
+            this.userMessageCount.delete(userId);
         }
     }
 }
@@ -327,9 +378,17 @@ const client = new Client({
         dataPath: SESSION_DIR
     }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        headless: true
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas'
+        ],
+        headless: true,
+        timeout: 60000
     },
+    qrMaxRetries: 3,
     restartOnAuthFail: true
 });
 
@@ -493,21 +552,26 @@ async function processMessageWithQueue(chat, message, processedContent) {
         ...message,
         body: processedContent
     }, async () => {
+        const cacheKey = processedContent.toLowerCase().trim();
+        if (messageCache.has(cacheKey)) {
+            return messageCache.get(cacheKey);
+        }
+
         try {
-            const response = await axios.get(
-                `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
+            const response = await makeApiCall(
+                'https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai',
                 {
-                    params: {
-                        input: processedContent,
-                        imgUrl: '',
-                        APiKey: `okeymeta-${message.from}`
-                    },
-                    timeout: 90000
+                    input: processedContent,
+                    imgUrl: '',
+                    APiKey: `okeymeta-${message.from}`
                 }
             );
 
             if (response.data?.response) {
-                return response.data.response.trim();
+                const result = response.data.response.trim();
+                messageCache.set(cacheKey, result);
+                setTimeout(() => messageCache.delete(cacheKey), CACHE_DURATION);
+                return result;
             }
             throw new Error('Invalid API response');
         } catch (error) {
@@ -531,6 +595,7 @@ client.initialize()
 const shutdown = async () => {
     console.log(chalk.yellow('\nShutting down...'));
     try {
+        clearInterval(gcInterval);
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
         server.close(() => {
