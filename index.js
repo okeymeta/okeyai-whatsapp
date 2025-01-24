@@ -27,6 +27,21 @@ const RESTART_DELAY = 5000; // 5 seconds delay before restart
 const CONNECTION_CHECK_INTERVAL = 60000; // Check connection every minute
 const SESSION_CLEANUP_INTERVAL = 3600000; // Cleanup every hour
 
+// Add new constants
+const PUPPETEER_OPTIONS = {
+    args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu'
+    ],
+    headless: 'new',
+    timeout: 0
+};
+
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
 if (!fs.existsSync(SESSION_DIR)) {
@@ -329,11 +344,11 @@ const client = new Client({
         clientId: 'whatsapp-bot',
         dataPath: SESSION_DIR
     }),
-    puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        headless: true
-    },
-    restartOnAuthFail: true
+    puppeteer: PUPPETEER_OPTIONS,
+    restartOnAuthFail: true,
+    qrMaxRetries: 5,
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 0
 });
 
 // Connection status tracking
@@ -355,14 +370,23 @@ const reconnect = async () => {
         console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
         
         try {
+            // Destroy existing client first
+            await client.destroy();
+            // Wait before trying to reconnect
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+            // Initialize again
             await client.initialize();
         } catch (error) {
             console.error(chalk.red('Reconnection failed:'), error);
-            setTimeout(reconnect, RETRY_DELAY);
+            // Add exponential backoff
+            await new Promise(resolve => 
+                setTimeout(resolve, RETRY_DELAY * Math.pow(2, reconnectAttempts))
+            );
+            await reconnect();
         }
     } else {
-        console.error(chalk.red('Max reconnection attempts reached. Please restart the application.'));
-        process.exit(1);
+        console.error(chalk.red('Max reconnection attempts reached. Restarting process...'));
+        process.exit(1); // Process manager should restart the application
     }
 };
 
@@ -402,6 +426,11 @@ client.on('disconnected', async (reason) => {
     isConnected = false;
     handleConnectionState('DISCONNECTED');
     await reconnect();
+});
+
+// Add this new event handler
+client.on('loading_screen', (percent, message) => {
+    console.log(chalk.blue('LOADING SCREEN:', percent, message));
 });
 
 // Message handler with retry mechanism
@@ -550,18 +579,21 @@ console.log('Starting WhatsApp client...\n');
 connectionCheckTimer = setInterval(checkConnection, CONNECTION_CHECK_INTERVAL);
 sessionCleanupTimer = setInterval(cleanupSessions, SESSION_CLEANUP_INTERVAL);
 
-client.initialize()
-    .then(() => {
+// Initialize with better error handling
+const initializeClient = async () => {
+    try {
         handleConnectionState('INITIALIZING');
-        // Initial session cleanup
+        await client.initialize();
         cleanupSessions();
-    })
-    .catch(async (error) => {
+    } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
         handleConnectionState('INITIALIZATION_FAILED');
         await new Promise(resolve => setTimeout(resolve, RESTART_DELAY));
         await reconnect();
-    });
+    }
+};
+
+initializeClient();
 
 // Modify the shutdown function to clear intervals
 const shutdown = async () => {
