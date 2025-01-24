@@ -23,6 +23,11 @@ const BOT_PREFIX = 'okeyai';
 const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
 
+// Add new constants
+const KEEPALIVE_INTERVAL = 30000; // 30 seconds
+const MEMORY_CHECK_INTERVAL = 300000; // 5 minutes
+const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB limit
+
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
 if (!fs.existsSync(SESSION_DIR)) {
@@ -305,17 +310,35 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
-// Instantiate new WhatsApp client with persistent session
+// Enhance client configuration
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'whatsapp-bot',
         dataPath: SESSION_DIR
     }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        headless: true
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--disable-gpu',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-default-apps',
+            '--disable-sync',
+            '--no-zygote',
+            '--single-process'
+        ],
+        headless: true,
+        timeout: 0,
+        defaultViewport: null
     },
-    restartOnAuthFail: true
+    restartOnAuthFail: true,
+    qrMaxRetries: 5,
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 0
 });
 
 // Connection status tracking
@@ -335,15 +358,47 @@ const reconnect = async () => {
         console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
         
         try {
+            await client.destroy();
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
             await client.initialize();
         } catch (error) {
             console.error(chalk.red('Reconnection failed:'), error);
-            setTimeout(reconnect, RETRY_DELAY);
+            setTimeout(reconnect, RETRY_DELAY * reconnectAttempts);
         }
     } else {
-        console.error(chalk.red('Max reconnection attempts reached. Please restart the application.'));
-        process.exit(1);
+        console.error(chalk.red('Max reconnection attempts reached. Restarting process...'));
+        process.exit(1); // Process manager should restart the application
     }
+};
+
+// Add keepalive and memory management functions
+const setupKeepAlive = () => {
+    setInterval(async () => {
+        if (isConnected && client.pupPage) {
+            try {
+                await client.pupPage.evaluate(() => console.log('keepalive'));
+                await client.sendPresenceAvailable();
+            } catch (error) {
+                console.error(chalk.yellow('Keepalive error:'), error);
+                handleConnectionState('RECONNECTING');
+                await reconnect();
+            }
+        }
+    }, KEEPALIVE_INTERVAL);
+};
+
+const setupMemoryManagement = () => {
+    setInterval(() => {
+        const memoryUsage = process.memoryUsage().heapUsed;
+        if (memoryUsage > MAX_MEMORY_USAGE) {
+            console.log(chalk.yellow('High memory usage detected, running garbage collection...'));
+            try {
+                global.gc();
+            } catch (e) {
+                console.log(chalk.yellow('Manual garbage collection not available'));
+            }
+        }
+    }, MEMORY_CHECK_INTERVAL);
 };
 
 // QR code event handler
@@ -500,7 +555,11 @@ async function processMessageWithQueue(chat, message, processedContent) {
 // Initialize client with connection state handling
 console.log('Starting WhatsApp client...\n');
 client.initialize()
-    .then(() => handleConnectionState('INITIALIZING'))
+    .then(() => {
+        handleConnectionState('INITIALIZING');
+        setupKeepAlive();
+        setupMemoryManagement();
+    })
     .catch(async (error) => {
         console.error(chalk.red('Initialization failed:'), error);
         handleConnectionState('INITIALIZATION_FAILED');
