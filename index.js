@@ -29,15 +29,30 @@ server.listen(PORT, () => {
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
-const MESSAGE_QUEUE_INTERVAL = 1000; // Optimize all timing constants
-const TYPING_DURATION = { MIN: 500, MAX: 2000 }; // Optimize all timing constants
-const MAX_CONCURRENT_CHATS = 25; // Optimize all timing constants
-const DAILY_MESSAGE_LIMIT = 1000; // Optimize all timing constants
-const HOURLY_MESSAGE_LIMIT = 100; // Optimize all timing constants
 const BOT_PREFIX = 'okeyai';
 const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
-const API_TIMEOUT = 15000; // Optimize all timing constants
+
+// Performance optimization
+const PERFORMANCE_OPTS = {
+    MESSAGE_DELAY: 0,
+    TYPING_MIN: 0,
+    TYPING_MAX: 100,
+    API_TIMEOUT: 5000,
+    CACHE_DURATION: 300000,
+    MAX_CONCURRENT: 50,
+    QUEUE_CHECK: 100
+};
+
+// Remove old timing constants and use PERFORMANCE_OPTS instead
+const MESSAGE_QUEUE_INTERVAL = PERFORMANCE_OPTS.MESSAGE_DELAY;
+const TYPING_DURATION = { 
+    MIN: PERFORMANCE_OPTS.TYPING_MIN, 
+    MAX: PERFORMANCE_OPTS.TYPING_MAX 
+};
+const API_TIMEOUT = PERFORMANCE_OPTS.API_TIMEOUT;
+const CACHE_DURATION = PERFORMANCE_OPTS.CACHE_DURATION;
+const MAX_CONCURRENT_CHATS = PERFORMANCE_OPTS.MAX_CONCURRENT;
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -157,7 +172,6 @@ async function sendWhatsAppImage(chat, caption, imageUrl) {
 
 // Add response cache and duration constants
 const messageCache = new Map();
-const CACHE_DURATION = 60000; // 1 minute cache
 const CONCURRENT_API_CALLS = 10; // Increase concurrent API calls
 
 // Memory optimization
@@ -179,8 +193,8 @@ async function makeApiCall(url, params) {
         return { data: { response: messageCache.get(cacheKey) } };
     }
 
-    while (apiCallsInProgress.size >= CONCURRENT_API_CALLS) {
-        await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
+    while (apiCallsInProgress.size >= PERFORMANCE_OPTS.MAX_CONCURRENT) {
+        await new Promise(resolve => setTimeout(resolve, PERFORMANCE_OPTS.QUEUE_CHECK));
     }
     
     const callId = Date.now();
@@ -189,7 +203,7 @@ async function makeApiCall(url, params) {
     try {
         const response = await axios.get(url, {
             params,
-            timeout: API_TIMEOUT,
+            timeout: PERFORMANCE_OPTS.API_TIMEOUT,
             headers: {
                 'Connection': 'close',
                 'Accept': 'application/json',
@@ -309,7 +323,7 @@ class MessageQueue {
         const userQueue = this.queue.get(userId);
         while (userQueue && userQueue.length > 0) {
             if (!this.canProcessMessage()) {
-                await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
+                await new Promise(resolve => setTimeout(resolve, PERFORMANCE_OPTS.QUEUE_CHECK));
                 continue;
             }
 
@@ -371,16 +385,6 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
-// Performance optimization
-const PERFORMANCE_OPTS = {
-    MESSAGE_DELAY: 100,
-    TYPING_MIN: 200,
-    TYPING_MAX: 500,
-    API_TIMEOUT: 8000,
-    CACHE_DURATION: 300000, // 5 minutes
-    MAX_CONCURRENT: 30
-};
-
 // Update client configuration for better performance
 const client = new Client({
     authStrategy: new LocalAuth({
@@ -411,16 +415,13 @@ const client = new Client({
             '--no-first-run',
             '--safebrowsing-disable-auto-update'
         ],
-        timeout: 60000,
-        defaultViewport: { width: 800, height: 600 },
+        timeout: 30000,
+        defaultViewport: null,
         handleSIGINT: false,
         handleSIGTERM: false
     },
-    qrMaxRetries: 3,
-    restartOnAuthFail: true,
     takeoverOnConflict: true,
-    authTimeoutMs: 60000,
-    qrQualityOptions: { quality: 0.5 }
+    takeoverTimeoutMs: 10000
 });
 
 // Connection status tracking
@@ -499,7 +500,7 @@ const startConnectionCheck = () => {
                 console.error(chalk.red('Connection check failed:'), error);
             }
         }
-    }, 30000); // Check every 30 seconds
+    }, 15000); // Check every 15 seconds
 };
 
 // Update ready handler
@@ -509,6 +510,10 @@ client.on('ready', () => {
     console.log(chalk.green('\nOkeyAI is ready and connected!'));
     console.log(chalk.greenBright('OkeyAI activated. Listening for messages...'));
     startConnectionCheck();
+    
+    // Reset message queue on ready
+    messageQueue.queue.clear();
+    messageQueue.processingQueues.clear();
 });
 
 // Disconnection handler
