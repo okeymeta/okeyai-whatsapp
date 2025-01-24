@@ -27,21 +27,17 @@ const RESTART_DELAY = 5000; // 5 seconds delay before restart
 const CONNECTION_CHECK_INTERVAL = 60000; // Check connection every minute
 const SESSION_CLEANUP_INTERVAL = 3600000; // Cleanup every hour
 
-// Update PUPPETEER_OPTIONS
-const PUPPETEER_OPTIONS = {
+// Replace PUPPETEER_OPTIONS with BROWSER_OPTIONS
+const BROWSER_OPTIONS = {
     args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-software-rasterizer',
-        '--disable-web-security',
-        '--no-first-run',
-        '--single-process'
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu'
     ],
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
-    headless: 'new',
-    timeout: 0
+    channel: 'chrome',
+    headless: true
 };
 
 // Create sessions directory if it doesn't exist
@@ -346,7 +342,10 @@ const client = new Client({
         clientId: 'whatsapp-bot',
         dataPath: SESSION_DIR
     }),
-    puppeteer: PUPPETEER_OPTIONS,
+    playwright: {
+        browserName: 'chromium',
+        launchOptions: BROWSER_OPTIONS
+    },
     webVersion: '2.2346.52',
     webVersionCache: {
         type: 'none'
@@ -378,15 +377,12 @@ const reconnect = async () => {
         console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
         
         try {
+            // More graceful cleanup
             if (client.pupPage) {
-                try {
-                    await client.pupPage.close().catch(() => {});
-                } catch (e) {}
+                await client.pupPage.close().catch(() => {});
             }
-            if (client.pupBrowser) {
-                try {
-                    await client.pupBrowser.close().catch(() => {});
-                } catch (e) {}
+            if (client.browser) {
+                await client.browser.close().catch(() => {});
             }
             
             await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * 2));
@@ -398,12 +394,10 @@ const reconnect = async () => {
                     setTimeout(resolve, RETRY_DELAY * Math.pow(2, reconnectAttempts))
                 );
                 await reconnect();
-            } else {
-                console.error(chalk.red('Max reconnection attempts reached. Exiting...'));
-                process.exit(1);
             }
         }
     } else {
+        console.error(chalk.red('Max reconnection attempts reached. Restarting...'));
         process.exit(1);
     }
 };
