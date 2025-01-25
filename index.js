@@ -27,7 +27,7 @@ const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
 
 // Add new constants
-const KEEPALIVE_INTERVAL = 3000; // Reduce to 3 seconds
+const KEEPALIVE_INTERVAL = 1000; // More frequent keep-alive (1 second)
 const MEMORY_CHECK_INTERVAL = 300000; // 5 minutes
 const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB limit
 const PORT = process.env.PORT || 10000; // Match Render's detected port
@@ -46,9 +46,11 @@ const ACTIVITY_SIMULATION_INTERVAL = 45000; // 45 seconds
 const HEARTBEAT_INTERVAL = 10000; // 10 seconds for heartbeat
 const ACTIVE_PING_INTERVAL = 8000; // 8 seconds for active ping
 const BROWSER_CHECK_INTERVAL = 3000; // Check browser every 3 seconds
-const CONNECTION_CHECK_INTERVAL = 5000; // Reduce to 5 seconds
+const CONNECTION_CHECK_INTERVAL = 2000; // More frequent checks (2 seconds)
 const MAX_RESPONSE_TIME = 15000; // Maximum response time threshold
 const RESTART_THRESHOLD = 30000; // 30 seconds threshold for forced restart
+const PREVENT_IDLE_TIMEOUT = 30000; // Check for idle every 30 seconds
+const MAX_INACTIVE_TIME = 60000; // Consider inactive after 1 minute
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -556,39 +558,59 @@ const pingExternalUrl = async () => {
 
 // Add new keepalive function
 const maintainConnection = () => {
-    let lastSuccessfulPing = Date.now();
-    
-    // Aggressive connection maintenance
-    setInterval(async () => {
-        if (isConnected) {
-            try {
-                await Promise.all([
-                    client.sendPresenceAvailable(),
-                    client.pupPage?.evaluate(() => {
-                        document.title = `Active ${Date.now()}`;
-                        window.dispatchEvent(new Event('focus'));
-                    }),
-                    axios.get(`http://localhost:${PORT}/ping`)
-                ]);
-                
-                lastSuccessfulPing = Date.now();
-            } catch (error) {
-                const timeSinceLastPing = Date.now() - lastSuccessfulPing;
-                if (timeSinceLastPing > 30000) { // 30 seconds without successful ping
-                    console.log(chalk.yellow('Connection appears stale, forcing refresh...'));
-                    await reconnect();
+    let lastActivity = Date.now();
+    let keepAliveInterval;
+
+    const updateActivity = () => {
+        lastActivity = Date.now();
+    };
+
+    const startKeepAlive = () => {
+        if (keepAliveInterval) clearInterval(keepAliveInterval);
+        
+        keepAliveInterval = setInterval(async () => {
+            if (isConnected && client.pupPage) {
+                try {
+                    // Force connection to stay alive
+                    await Promise.allSettled([
+                        client.sendPresenceAvailable(),
+                        client.pupPage.evaluate(() => {
+                            document.title = `Active ${Date.now()}`;
+                            window.dispatchEvent(new Event('focus'));
+                            window.dispatchEvent(new Event('mousemove'));
+                            return true;
+                        }),
+                        pingExternalUrl()
+                    ]);
+                    updateActivity();
+                } catch (error) {
+                    // Ignore errors but log them
+                    console.log(chalk.yellow('Keep-alive error (non-critical):', error.message));
                 }
             }
-        }
-    }, KEEPALIVE_INTERVAL);
+        }, KEEPALIVE_INTERVAL);
+    };
 
-    // Additional heartbeat
-    setInterval(() => {
-        if (isConnected) {
-            http.get(`http://0.0.0.0:${PORT}`).end();
-            console.log('Heartbeat:', new Date().toISOString());
+    // Start keep-alive immediately
+    startKeepAlive();
+
+    // Prevent idle disconnections
+    setInterval(async () => {
+        const inactiveTime = Date.now() - lastActivity;
+        if (inactiveTime > MAX_INACTIVE_TIME) {
+            console.log(chalk.yellow('Preventing idle timeout...'));
+            try {
+                await client.sendPresenceAvailable();
+                if (client.pupPage) {
+                    await client.pupPage.evaluate(() => location.reload());
+                }
+                updateActivity();
+            } catch (error) {
+                console.log(chalk.yellow('Idle prevention error:', error.message));
+                await reconnect();
+            }
         }
-    }, 1000); // Every second
+    }, PREVENT_IDLE_TIMEOUT);
 };
 
 // Add new function for browser monitoring
@@ -865,6 +887,11 @@ server.listen(PORT, '0.0.0.0', async () => {
                 reconnect();
             }
         }, 30000); // Increased to 30 seconds
+
+        // Add continuous ping to prevent sleep
+        setInterval(() => {
+            http.get(`http://0.0.0.0:${PORT}/ping`).end();
+        }, 1000);
         
     } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
@@ -875,6 +902,18 @@ server.listen(PORT, '0.0.0.0', async () => {
 
 // Graceful shutdown
 const shutdown = async (forceRestart = false) => {
+    // Always prevent shutdown in production
+    if (process.env.NODE_ENV === 'production') {
+        console.log(chalk.blue('Shutdown prevented - keeping bot alive'));
+        return;
+    }
+
+    // Only proceed with shutdown if explicitly forced
+    if (!forceRestart) {
+        console.log(chalk.blue('Shutdown prevented - bot will stay active'));
+        return;
+    }
+
     // Prevent multiple shutdown attempts
     if (global.isShuttingDown) return;
     global.isShuttingDown = true;
@@ -923,8 +962,13 @@ const shutdown = async (forceRestart = false) => {
     }
 };
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => {
+    console.log('Received SIGINT - ignoring to keep bot alive');
+});
+
+process.on('SIGTERM', () => {
+    console.log('Received SIGTERM - ignoring to keep bot alive');
+});
 
 // Add these process error handlers at the end of the file
 process.on('uncaughtException', (err) => {
@@ -934,8 +978,15 @@ process.on('uncaughtException', (err) => {
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-    console.error(chalk.red('Unhandled Rejection at:'), promise, 'reason:', reason);
-    // Continue running but log the error
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    // Don't exit, just log the error
+});
+
+process.on('exit', (code) => {
+    if (process.env.NODE_ENV === 'production') {
+        console.log('Exit prevented - keeping bot alive');
+        process.exit(0);
+    }
 });
 
 // Remove the old production heartbeat at the end of the file and replace with this:
