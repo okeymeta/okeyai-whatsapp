@@ -35,6 +35,10 @@ const HEALTH_CHECK_INTERVAL = 25 * 60 * 1000; // 25 minutes
 const PING_INTERVAL = 4 * 60 * 1000; // 4 minutes
 const AUTO_RESTART_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours
 
+// Add new constants after other constants
+const IDLE_PING_INTERVAL = 25000; // 25 seconds
+const ACTIVITY_SIMULATION_INTERVAL = 45000; // 45 seconds
+
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
 if (!fs.existsSync(SESSION_DIR)) {
@@ -386,6 +390,7 @@ const reconnect = async () => {
 
 // Add keepalive and memory management functions
 const setupKeepAlive = () => {
+    // Original keepalive logic
     setInterval(async () => {
         if (isConnected && client.pupPage) {
             try {
@@ -398,6 +403,17 @@ const setupKeepAlive = () => {
             }
         }
     }, KEEPALIVE_INTERVAL);
+
+    // Add new idle prevention pings
+    setInterval(() => {
+        if (isConnected) {
+            http.get(`http://0.0.0.0:${PORT}/ping`, () => {})
+                .on('error', () => {});
+        }
+    }, IDLE_PING_INTERVAL);
+
+    // Add activity simulation
+    setInterval(simulateActivity, ACTIVITY_SIMULATION_INTERVAL);
 };
 
 const setupMemoryManagement = () => {
@@ -446,8 +462,35 @@ const setupHealthCheck = () => {
     }, AUTO_RESTART_INTERVAL);
 };
 
+// Add this function after other utility functions
+const simulateActivity = async () => {
+    if (isConnected && client.pupPage) {
+        try {
+            // Simulate minimal activity to keep connection alive
+            await client.sendPresenceAvailable();
+            await client.pupPage.evaluate(() => console.log('keep-alive ping'));
+            
+            // Force minimal browser activity
+            if (client.pupPage) {
+                await client.pupPage.evaluate(() => {
+                    window.dispatchEvent(new Event('focus'));
+                    document.dispatchEvent(new Event('mousemove'));
+                });
+            }
+        } catch (error) {
+            console.log(chalk.yellow('Activity simulation error (non-critical):'), error.message);
+        }
+    }
+};
+
 // Modify the HTTP server to include a more robust health check
 const server = http.createServer((req, res) => {
+    if (req.url === '/ping') {
+        res.writeHead(200);
+        res.end('pong');
+        return;
+    }
+
     if (isConnected) {
         res.writeHead(200);
         res.end(JSON.stringify({
