@@ -27,7 +27,7 @@ const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
 
 // Add new constants
-const KEEPALIVE_INTERVAL = 10000; // More frequent pings (10 seconds)
+const KEEPALIVE_INTERVAL = 5000; // Reduced to 5 seconds
 const MEMORY_CHECK_INTERVAL = 300000; // 5 minutes
 const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB limit
 const PORT = process.env.PORT || 10000; // Match Render's detected port
@@ -45,6 +45,9 @@ const ACTIVITY_SIMULATION_INTERVAL = 45000; // 45 seconds
 // Update constants
 const HEARTBEAT_INTERVAL = 10000; // 10 seconds for heartbeat
 const ACTIVE_PING_INTERVAL = 8000; // 8 seconds for active ping
+const BROWSER_CHECK_INTERVAL = 3000; // Check browser every 3 seconds
+const CONNECTION_CHECK_INTERVAL = 10000; // Check connection every 10 seconds
+const MAX_RESPONSE_TIME = 15000; // Maximum response time threshold
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -398,21 +401,50 @@ const reconnect = async () => {
         console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
         
         try {
-            if (client.pupPage) {
-                await client.pupPage.reload().catch(() => {});
+            // Properly close existing browser if any
+            if (client.pupPage && client.pupBrowser) {
+                try {
+                    await client.pupPage.close();
+                    await client.pupBrowser.close();
+                } catch (e) {
+                    // Ignore close errors
+                }
             }
+
+            // Complete cleanup
             await client.destroy();
+            
+            // Wait before new attempt
             await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+            
+            // Reset puppeteer instance
+            client.options.puppeteer.args = [
+                ...client.options.puppeteer.args,
+                '--disable-web-security',
+                '--no-sandbox',
+                '--disable-web-security',
+                '--aggressive-cache-discard',
+                '--disable-cache',
+                '--disable-application-cache',
+                '--disable-offline-load-stale-cache',
+                '--disk-cache-size=0'
+            ];
+
+            // Initialize with fresh browser instance
             await client.initialize();
+            
+            // Reset reconnect attempts on successful connection
+            reconnectAttempts = 0;
         } catch (error) {
             console.error(chalk.red('Reconnection failed:'), error);
-            // Exponential backoff
-            const delay = RETRY_DELAY * Math.pow(2, reconnectAttempts - 1);
-            setTimeout(reconnect, delay);
+            // Exponential backoff with maximum delay
+            const delay = Math.min(RETRY_DELAY * Math.pow(2, reconnectAttempts - 1), 60000);
+            setTimeout(() => reconnect(), delay);
         }
     } else {
         console.error(chalk.red('Max reconnection attempts reached. Forcing restart...'));
-        process.exit(1);
+        // Force clean shutdown and restart
+        await shutdown(true);
     }
 };
 
@@ -523,30 +555,65 @@ const pingExternalUrl = async () => {
 
 // Add new keepalive function
 const maintainConnection = () => {
-    let lastPing = Date.now();
+    let lastSuccessfulPing = Date.now();
     
+    // Aggressive connection maintenance
     setInterval(async () => {
-        const now = Date.now();
-        console.log('Service heartbeat:', new Date().toISOString());
-        
         if (isConnected) {
             try {
-                // Keep server active
-                await axios.get(`http://localhost:${PORT}/ping`);
-                await client.sendPresenceAvailable();
+                await Promise.all([
+                    client.sendPresenceAvailable(),
+                    client.pupPage?.evaluate(() => {
+                        document.title = `Active ${Date.now()}`;
+                        window.dispatchEvent(new Event('focus'));
+                    }),
+                    axios.get(`http://localhost:${PORT}/ping`)
+                ]);
                 
-                // Force reconnect if no ping for too long
-                if (now - lastPing > 30000) {
-                    console.log(chalk.yellow('No recent ping, refreshing connection...'));
-                    await client.pupPage?.reload().catch(() => {});
-                }
-                
-                lastPing = now;
+                lastSuccessfulPing = Date.now();
             } catch (error) {
-                console.log(chalk.yellow('Connection maintenance error:', error.message));
+                const timeSinceLastPing = Date.now() - lastSuccessfulPing;
+                if (timeSinceLastPing > 30000) { // 30 seconds without successful ping
+                    console.log(chalk.yellow('Connection appears stale, forcing refresh...'));
+                    await reconnect();
+                }
             }
         }
-    }, 5000); // More frequent checks
+    }, KEEPALIVE_INTERVAL);
+
+    // Additional heartbeat
+    setInterval(() => {
+        if (isConnected) {
+            http.get(`http://0.0.0.0:${PORT}`).end();
+            console.log('Heartbeat:', new Date().toISOString());
+        }
+    }, 1000); // Every second
+};
+
+// Add new function for browser monitoring
+const setupBrowserMonitoring = () => {
+    let browserRestartCount = 0;
+    
+    setInterval(async () => {
+        if (isConnected) {
+            try {
+                if (!client.pupPage || !client.pupBrowser || !await client.pupPage.evaluate(() => true).catch(() => false)) {
+                    console.log(chalk.yellow('Browser health check failed, refreshing connection...'));
+                    browserRestartCount++;
+                    
+                    if (browserRestartCount > 3) {
+                        process.exit(1); // Force complete restart if too many browser restarts
+                    }
+                    
+                    await reconnect();
+                } else {
+                    browserRestartCount = 0; // Reset counter on successful check
+                }
+            } catch (error) {
+                console.log(chalk.yellow('Browser check error:', error.message));
+            }
+        }
+    }, BROWSER_CHECK_INTERVAL);
 };
 
 // Update the server creation
@@ -691,10 +758,14 @@ async function processMessageWithQueue(chat, message, processedContent) {
         ...message,
         body: processedContent
     }, async () => {
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), MAX_RESPONSE_TIME);
 
+        try {
+            // Start typing indicator immediately
+            chat.sendStateTyping().catch(() => {});
+
+            // Make API call with optimized settings
             const response = await axios.get(
                 `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
                 {
@@ -704,19 +775,23 @@ async function processMessageWithQueue(chat, message, processedContent) {
                         APiKey: `okeymeta-${message.from}`
                     },
                     signal: controller.signal,
+                    timeout: MAX_RESPONSE_TIME,
                     headers: {
-                        'Keep-Alive': 'timeout=30, max=1000',
-                        'Connection': 'keep-alive'
-                    }
+                        'Keep-Alive': 'timeout=60, max=1000',
+                        'Connection': 'keep-alive',
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache'
+                    },
+                    responseType: 'json'
                 }
             );
 
             clearTimeout(timeoutId);
-            return response.data?.response?.trim() || 
-                   "I apologize, but I couldn't process that request properly.";
+            return response.data?.response?.trim();
         } catch (error) {
+            clearTimeout(timeoutId);
             console.error(chalk.red('API Error:'), error.message);
-            return "I'm having trouble processing your message. Please try again.";
+            throw error; // Let the queue handler deal with retries
         }
     });
 }
@@ -736,14 +811,15 @@ server.listen(PORT, '0.0.0.0', async () => {
         setupMemoryManagement();
         setupHealthCheck();
         maintainConnection(); // Add the new aggressive keep-alive
+        setupBrowserMonitoring(); // Add browser monitoring
         
-        // Additional connection monitoring
+        // Additional connection monitoring with longer interval
         setInterval(() => {
-            if (!isConnected) {
+            if (!isConnected && !client.pupPage) {
                 console.log(chalk.yellow('Connection check failed, attempting reconnect...'));
                 reconnect();
             }
-        }, 15000);
+        }, 30000); // Increased to 30 seconds
         
     } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
@@ -753,10 +829,19 @@ server.listen(PORT, '0.0.0.0', async () => {
 });
 
 // Graceful shutdown
-const shutdown = async () => {
+const shutdown = async (forceRestart = false) => {
     console.log(chalk.yellow('\nShutting down...'));
     try {
         handleConnectionState('SHUTTING_DOWN');
+        
+        // Clean up browser
+        if (client.pupPage) {
+            await client.pupPage.close().catch(() => {});
+        }
+        if (client.pupBrowser) {
+            await client.pupBrowser.close().catch(() => {});
+        }
+        
         await client.destroy();
         
         // Close server properly with a promise
@@ -768,12 +853,14 @@ const shutdown = async () => {
             }
         });
         
-        console.log(chalk.green('Successfully logged out and cleaned up.'));
+        console.log(chalk.green('Successfully cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
         handleConnectionState('SHUTDOWN_ERROR');
     }
-    process.exit(0);
+    
+    // Exit with different codes for restart vs shutdown
+    process.exit(forceRestart ? 1 : 0);
 };
 
 process.on('SIGINT', shutdown);
