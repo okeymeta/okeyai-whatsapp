@@ -25,10 +25,11 @@ const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
 
 // Add new constants
-const KEEPALIVE_INTERVAL = 30000; // 30 seconds
+const KEEPALIVE_INTERVAL = 10000; // More frequent pings (10 seconds)
 const MEMORY_CHECK_INTERVAL = 300000; // 5 minutes
 const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB limit
-const PORT = process.env.PORT || 3000; // Add this line
+const PORT = process.env.PORT || 10000; // Match Render's detected port
+const PING_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`; // Add this line
 
 // Add these new constants after existing constants
 const HEALTH_CHECK_INTERVAL = 25 * 60 * 1000; // 25 minutes
@@ -390,30 +391,29 @@ const reconnect = async () => {
 
 // Add keepalive and memory management functions
 const setupKeepAlive = () => {
-    // Original keepalive logic
+    // Aggressive keep-alive strategy
     setInterval(async () => {
-        if (isConnected && client.pupPage) {
+        if (isConnected) {
             try {
-                await client.pupPage.evaluate(() => console.log('keepalive'));
+                // Send WhatsApp presence
                 await client.sendPresenceAvailable();
+                
+                // Ping our own endpoint
+                await pingExternalUrl();
+                
+                // Force browser activity
+                if (client.pupPage) {
+                    await client.pupPage.evaluate(() => {
+                        document.title = `Active - ${Date.now()}`;
+                        window.dispatchEvent(new Event('focus'));
+                        window.dispatchEvent(new Event('mousemove'));
+                    });
+                }
             } catch (error) {
-                console.error(chalk.yellow('Keepalive error:'), error);
-                handleConnectionState('RECONNECTING');
-                await reconnect();
+                console.log(chalk.yellow('Keep-alive cycle error (non-critical):', error.message));
             }
         }
     }, KEEPALIVE_INTERVAL);
-
-    // Add new idle prevention pings
-    setInterval(() => {
-        if (isConnected) {
-            http.get(`http://0.0.0.0:${PORT}/ping`, () => {})
-                .on('error', () => {});
-        }
-    }, IDLE_PING_INTERVAL);
-
-    // Add activity simulation
-    setInterval(simulateActivity, ACTIVITY_SIMULATION_INTERVAL);
 };
 
 const setupMemoryManagement = () => {
@@ -483,28 +483,20 @@ const simulateActivity = async () => {
     }
 };
 
+// Add this function to perform external ping
+const pingExternalUrl = async () => {
+    try {
+        const response = await axios.get(PING_URL);
+        return response.status === 200;
+    } catch (error) {
+        return false;
+    }
+};
+
 // Modify the HTTP server to include a more robust health check
 const server = http.createServer((req, res) => {
-    if (req.url === '/ping') {
-        res.writeHead(200);
-        res.end('pong');
-        return;
-    }
-
-    if (isConnected) {
-        res.writeHead(200);
-        res.end(JSON.stringify({
-            status: 'ok',
-            uptime: process.uptime(),
-            timestamp: Date.now()
-        }));
-    } else {
-        res.writeHead(503);
-        res.end(JSON.stringify({
-            status: 'reconnecting',
-            timestamp: Date.now()
-        }));
-    }
+    res.writeHead(200);
+    res.end('OK');
 });
 
 server.listen(PORT, '0.0.0.0', () => {
@@ -634,7 +626,7 @@ client.on('message', async (message) => {
 async function processMessageWithQueue(chat, message, processedContent) {
     await chat.sendSeen();
     
-    await messageQueue.addToQueue(chat, {
+    return messageQueue.addToQueue(chat, {
         ...message,
         body: processedContent
     }, async () => {
@@ -647,17 +639,18 @@ async function processMessageWithQueue(chat, message, processedContent) {
                         imgUrl: '',
                         APiKey: `okeymeta-${message.from}`
                     },
-                    timeout: 45000 // Reduced from 90000 to 45000ms
+                    timeout: 30000, // Reduced timeout
+                    headers: {
+                        'Keep-Alive': 'timeout=30, max=1000'
+                    }
                 }
             );
 
-            if (response.data?.response) {
-                return response.data.response.trim();
-            }
-            throw new Error('Invalid API response');
+            return response.data?.response?.trim() || 
+                   "I apologize, but I couldn't process that request properly.";
         } catch (error) {
             console.error(chalk.red('API Error:'), error.message);
-            return "I'm having trouble processing your message right now. Please try again in a moment.";
+            return "I'm having trouble processing your message. Please try again.";
         }
     });
 }
@@ -670,6 +663,14 @@ client.initialize()
         setupKeepAlive();
         setupMemoryManagement();
         setupHealthCheck(); // Add this line
+        
+        // Start HTTP server immediately
+        server.listen(PORT, '0.0.0.0', () => {
+            console.log(chalk.blue(`Server active on port ${PORT}`));
+        });
+        
+        // Set up persistent ping
+        setInterval(pingExternalUrl, KEEPALIVE_INTERVAL);
     })
     .catch(async (error) => {
         console.error(chalk.red('Initialization failed:'), error);
@@ -706,3 +707,11 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error(chalk.red('Unhandled Rejection at:'), promise, 'reason:', reason);
     // Continue running but log the error
 });
+
+// Add this at the end of the file
+if (process.env.NODE_ENV === 'production') {
+    // Prevent Render from killing the process
+    setInterval(() => {
+        console.log('Service heartbeat:', new Date().toISOString());
+    }, 60000);
+}
