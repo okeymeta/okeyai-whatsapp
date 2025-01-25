@@ -9,7 +9,6 @@ import http from 'http'; // Add this line
 import mongoose from 'mongoose'; // Add this line
 import { MongoStore } from 'wwebjs-mongo'; // Add this line
 import { EventEmitter } from 'events'; // Add this line
-import express from 'express'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -21,7 +20,7 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
 const MESSAGE_QUEUE_INTERVAL = 1000; // Reduced from 2000 to 1000ms
 const TYPING_DURATION = { MIN: 500, MAX: 1500 }; // Reduced from 2000-4000 to 500-1500ms
-const MAX_CONCURRENT_CHATS = 50; // Increase concurrent chats
+const MAX_CONCURRENT_CHATS = 15; // Maximum number of simultaneous chats
 const DAILY_MESSAGE_LIMIT = 1000; // Maximum messages per day
 const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
 const BOT_PREFIX = 'okeyai';
@@ -54,11 +53,6 @@ const RESTART_THRESHOLD = 60000; // Increase to 60 seconds
 const RECONNECT_DELAY = 1000; // More aggressive reconnect
 const API_RETRY_ATTEMPTS = 3;  // Add this constant
 const MAX_LISTENERS = 25; // Increase max listeners limit
-const RENDER_RESTART_DELAY = 2000; // 2 seconds delay before restart
-
-// Add new constants
-const RENDER_PING_INTERVAL = 25000; // 25 seconds
-const app = express();
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -748,20 +742,9 @@ client.on('qr', (qr) => {
 });
 
 // Authentication event handlers
-client.on('authenticated', async (session) => {
+client.on('authenticated', () => {
     console.log(chalk.green('WhatsApp authentication successful!\n'));
     handleConnectionState('AUTHENTICATED');
-    
-    // Store session in MongoDB
-    await Session.findOneAndUpdate(
-        { id: 'whatsapp-session' },
-        { 
-            data: session,
-            status: 'authenticated',
-            updatedAt: new Date()
-        },
-        { upsert: true }
-    );
 });
 
 client.on('auth_failure', async (message) => {
@@ -910,6 +893,9 @@ async function processMessageWithQueue(chat, message, processedContent) {
         ...message,
         body: processedContent
     }, async () => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), MAX_RESPONSE_TIME);
+
         const makeApiCall = async (attempt = 1) => {
             try {
                 const response = await axios.get(
@@ -924,9 +910,14 @@ async function processMessageWithQueue(chat, message, processedContent) {
                         headers: {
                             'Keep-Alive': 'timeout=60, max=1000',
                             'Connection': 'keep-alive',
+                            'Cache-Control': 'no-cache',
+                            'Pragma': 'no-cache'
                         },
-                        // Add abort signal
-                        signal: AbortSignal.timeout(15000)
+                        responseType: 'json',
+                        // Add retry configuration
+                        validateStatus: status => status < 500,
+                        maxRedirects: 5,
+                        maxContentLength: 50 * 1024 * 1024 // 50MB
                     }
                 );
                 return response.data?.response?.trim();
@@ -940,15 +931,18 @@ async function processMessageWithQueue(chat, message, processedContent) {
         };
 
         try {
-            return await Promise.race([
-                makeApiCall(),
-                new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('API timeout')), MAX_RESPONSE_TIME)
-                )
-            ]);
+            // Start typing indicator immediately
+            chat.sendStateTyping().catch(() => {});
+
+            // Make API call with optimized settings
+            const response = await makeApiCall();
+
+            clearTimeout(timeoutId);
+            return response;
         } catch (error) {
+            clearTimeout(timeoutId);
             console.error(chalk.red('API Error:'), error.message);
-            throw error;
+            throw error; // Let the queue handler deal with retries
         }
     });
 }
@@ -962,16 +956,10 @@ server.listen(PORT, '0.0.0.0', async () => {
     
     try {
         setupEventEmitterDefaults(); // Add this line
-        setupRenderKeepAlive(); // Add Render-specific keepalive
         
-        // Try to restore session from MongoDB
-        const savedSession = await Session.findOne({ id: 'whatsapp-session' });
-        if (savedSession?.data) {
-            await client.initialize(savedSession.data);
-        } else {
-            await client.initialize();
-        }
-        
+        // Initialize WhatsApp client after server is running
+        await client.initialize();
+        handleConnectionState('INITIALIZING');
         setupKeepAlive();
         setupMemoryManagement();
         setupHealthCheck();
@@ -998,34 +986,6 @@ server.listen(PORT, '0.0.0.0', async () => {
 
 // Graceful shutdown
 const shutdown = async (forceRestart = false) => {
-    if (process.env.NODE_ENV === 'production') {
-        console.log(chalk.blue('Production shutdown detected, triggering restart...'));
-        
-        try {
-            // Store state in MongoDB
-            await Session.findOneAndUpdate(
-                { id: 'whatsapp-session' },
-                { status: 'restarting' },
-                { upsert: true }
-            );
-            
-            // Cleanup
-            if (client.pupPage) await client.pupPage.close().catch(() => {});
-            if (client.pupBrowser) await client.pupBrowser.close().catch(() => {});
-            await client.destroy().catch(() => {});
-            
-            // Force process restart after brief delay
-            setTimeout(() => {
-                console.log(chalk.green('Restarting process...'));
-                process.exit(1); // Exit with error code to trigger Render restart
-            }, RENDER_RESTART_DELAY);
-            
-            return;
-        } catch (error) {
-            console.error(chalk.red('Error during restart:'), error);
-            process.exit(1); // Force restart anyway
-        }
-    }
     // Always prevent shutdown in production
     if (process.env.NODE_ENV === 'production') {
         console.log(chalk.blue('Shutdown prevented in production'));
@@ -1102,105 +1062,10 @@ process.on('unhandledRejection', async (reason, promise) => {
     // Don't exit, try to keep running
 });
 
-// Add new Render-specific keepalive
-const setupRenderKeepAlive = () => {
-    // Create a simple keep-alive server for Render
-    const keepAliveServer = http.createServer((_, res) => {
-        res.writeHead(200);
-        res.end('ok');
-    });
-
-    keepAliveServer.listen(KEEP_ALIVE_PORT, () => {
-        console.log(chalk.blue(`Keep-alive server running on port ${KEEP_ALIVE_PORT}`));
-    });
-
-    // Ping self every 30 seconds to prevent Render from sleeping
-    setInterval(() => {
-        http.get(`http://localhost:${KEEP_ALIVE_PORT}`).end();
-    }, 30000);
-};
-
-// Add this at the end of the file
+// Remove the old production heartbeat at the end of the file and replace with this:
 if (process.env.NODE_ENV === 'production') {
-    // Keep the process running but allow restarts
-    process.stdin.resume();
-    
-    // Auto-restart on any uncaught error in production
-    process.on('uncaughtException', (err) => {
-        console.error(chalk.red('Fatal error, restarting...'), err);
-        shutdown(true);
-    });
-
-    // Handle deployment restarts
+    process.stdin.resume(); // Keep process running
     process.on('SIGTERM', () => {
-        console.log('Deployment signal received, restarting...');
-        shutdown(true);
+        console.log('Received SIGTERM, keeping alive');
     });
-}
-
-// Add express middleware for better uptime
-app.get('/', (req, res) => {
-    res.json({ status: 'ok', uptime: process.uptime() });
-});
-
-app.get('/ping', (req, res) => {
-    res.send('pong');
-});
-
-// Add new function to keep Render alive
-const keepRenderAlive = () => {
-    setInterval(() => {
-        http.get(`http://localhost:${PORT}/ping`).end();
-    }, RENDER_PING_INTERVAL);
-};
-
-// Update server initialization
-const startServer = async () => {
-    try {
-        // Start express app
-        app.listen(PORT, '0.0.0.0', () => {
-            console.log(chalk.blue(`Server started on port ${PORT}`));
-        });
-
-        setupEventEmitterDefaults();
-        await client.initialize();
-        
-        // Setup all monitors
-        setupKeepAlive();
-        setupMemoryManagement();
-        setupHealthCheck();
-        maintainConnection();
-        setupBrowserMonitoring();
-        monitorConnection();
-        setupPersistentConnection();
-        keepRenderAlive(); // Add Render keep-alive
-
-        // Handle Render signals
-        process.on('SIGTERM', () => {
-            console.log('Received SIGTERM - Keeping alive');
-            // Don't exit, just acknowledge
-        });
-    } catch (error) {
-        console.error(chalk.red('Initialization failed:'), error);
-        // Wait and retry instead of exiting
-        setTimeout(() => startServer(), 5000);
-    }
-};
-
-// Start the server
-startServer();
-
-// Add at the end
-if (process.env.NODE_ENV === 'production') {
-    // Prevent any kind of shutdown in production
-    ['SIGTERM', 'SIGINT', 'SIGUSR1', 'SIGUSR2'].forEach(signal => {
-        process.on(signal, () => {
-            console.log(`Received ${signal} - Keeping process alive`);
-        });
-    });
-
-    // Keep process running
-    setInterval(() => {
-        console.log('Heartbeat:', new Date().toISOString());
-    }, 30000);
 }
