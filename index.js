@@ -900,9 +900,6 @@ async function processMessageWithQueue(chat, message, processedContent) {
         ...message,
         body: processedContent
     }, async () => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), MAX_RESPONSE_TIME);
-
         const makeApiCall = async (attempt = 1) => {
             try {
                 const response = await axios.get(
@@ -917,14 +914,9 @@ async function processMessageWithQueue(chat, message, processedContent) {
                         headers: {
                             'Keep-Alive': 'timeout=60, max=1000',
                             'Connection': 'keep-alive',
-                            'Cache-Control': 'no-cache',
-                            'Pragma': 'no-cache'
                         },
-                        responseType: 'json',
-                        // Add retry configuration
-                        validateStatus: status => status < 500,
-                        maxRedirects: 5,
-                        maxContentLength: 50 * 1024 * 1024 // 50MB
+                        // Add abort signal
+                        signal: AbortSignal.timeout(15000)
                     }
                 );
                 return response.data?.response?.trim();
@@ -938,18 +930,15 @@ async function processMessageWithQueue(chat, message, processedContent) {
         };
 
         try {
-            // Start typing indicator immediately
-            chat.sendStateTyping().catch(() => {});
-
-            // Make API call with optimized settings
-            const response = await makeApiCall();
-
-            clearTimeout(timeoutId);
-            return response;
+            return await Promise.race([
+                makeApiCall(),
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('API timeout')), MAX_RESPONSE_TIME)
+                )
+            ]);
         } catch (error) {
-            clearTimeout(timeoutId);
             console.error(chalk.red('API Error:'), error.message);
-            throw error; // Let the queue handler deal with retries
+            throw error;
         }
     });
 }
@@ -1125,57 +1114,6 @@ const setupRenderKeepAlive = () => {
         http.get(`http://localhost:${KEEP_ALIVE_PORT}`).end();
     }, 30000);
 };
-
-// Update processMessageWithQueue for better concurrency
-async function processMessageWithQueue(chat, message, processedContent) {
-    await chat.sendSeen();
-    
-    return messageQueue.addToQueue(chat, {
-        ...message,
-        body: processedContent
-    }, async () => {
-        const makeApiCall = async (attempt = 1) => {
-            try {
-                const response = await axios.get(
-                    `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
-                    {
-                        params: {
-                            input: processedContent,
-                            imgUrl: '',
-                            APiKey: `okeymeta-${message.from}`
-                        },
-                        timeout: MAX_RESPONSE_TIME,
-                        headers: {
-                            'Keep-Alive': 'timeout=60, max=1000',
-                            'Connection': 'keep-alive',
-                        },
-                        // Add abort signal
-                        signal: AbortSignal.timeout(15000)
-                    }
-                );
-                return response.data?.response?.trim();
-            } catch (error) {
-                if (attempt < API_RETRY_ATTEMPTS) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    return makeApiCall(attempt + 1);
-                }
-                throw error;
-            }
-        };
-
-        try {
-            return await Promise.race([
-                makeApiCall(),
-                new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('API timeout')), MAX_RESPONSE_TIME)
-                )
-            ]);
-        } catch (error) {
-            console.error(chalk.red('API Error:'), error.message);
-            throw error;
-        }
-    });
-}
 
 // Add this at the end of the file
 if (process.env.NODE_ENV === 'production') {
