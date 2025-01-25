@@ -432,18 +432,13 @@ const setupMemoryManagement = () => {
 
 // Add this function after setupMemoryManagement
 const setupHealthCheck = () => {
-    // Periodically hit our own HTTP endpoint to keep the service active
     setInterval(() => {
         try {
-            http.get(`http://0.0.0.0:${PORT}`, (res) => {
-                if (res.statusCode === 200) {
-                    console.log(chalk.blue('Health check passed'));
-                }
-            }).on('error', (err) => {
-                console.error(chalk.red('Health check failed:', err));
-            });
+            axios.get(`http://localhost:${PORT}`)
+                .then(() => console.log(chalk.blue('Health check passed')))
+                .catch(() => {});
         } catch (error) {
-            console.error(chalk.red('Health check error:', error));
+            // Ignore errors
         }
     }, HEALTH_CHECK_INTERVAL);
 
@@ -486,49 +481,26 @@ const simulateActivity = async () => {
 // Add this function to perform external ping
 const pingExternalUrl = async () => {
     try {
-        const url = `http://0.0.0.0:${PORT}/ping`;
+        const url = `http://localhost:${PORT}`;
         const response = await axios.get(url, {
             timeout: 5000,
             headers: {
-                'Keep-Alive': 'timeout=5, max=1000'
+                'Connection': 'keep-alive'
             }
         });
         return response.status === 200;
     } catch (error) {
-        console.log(chalk.yellow(`Ping failed on port ${PORT}:`, error.message));
         return false;
     }
 };
 
-// Modify server creation to be more explicit with port binding
+// Update the server creation
 const server = http.createServer((req, res) => {
-    // Add timestamp to response
-    const timestamp = new Date().toISOString();
-    
-    if (req.url === '/ping') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            status: 'ok',
-            timestamp,
-            port: PORT
-        }));
-        return;
-    }
-
-    if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            status: isConnected ? 'connected' : 'disconnected',
-            uptime: process.uptime(),
-            timestamp,
-            port: PORT
-        }));
-        return;
-    }
-
-    // Default response
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'running', timestamp }));
+    res.end(JSON.stringify({
+        status: 'ok',
+        timestamp: new Date().toISOString()
+    }));
 });
 
 // QR code event handler
@@ -685,40 +657,36 @@ async function processMessageWithQueue(chat, message, processedContent) {
 
 // Initialize client with connection state handling
 console.log('Starting WhatsApp client...\n');
-client.initialize()
-    .then(() => {
-        handleConnectionState('INITIALIZING');
-        
-        // Ensure server binds to 0.0.0.0 and uses the correct port
-        if (!server.listening) {
-            server.listen(PORT, '0.0.0.0', () => {
-                const address = server.address();
-                console.log(chalk.blue(`Server active on port ${address.port} (${address.address})`));
-                
-                // Start keep-alive cycle after successful server start
-                setupKeepAlive();
-                setupMemoryManagement();
-                setupHealthCheck();
-                
-                // Set up persistent ping using the correct URL
-                const pingInterval = setInterval(() => {
-                    if (isConnected) {
-                        pingExternalUrl().catch(error => {
-                            console.log(chalk.yellow('Ping error (non-critical):', error.message));
-                        });
-                    }
-                }, KEEPALIVE_INTERVAL);
 
-                // Clean up interval on shutdown
-                process.on('SIGTERM', () => clearInterval(pingInterval));
-            });
-        }
-    })
-    .catch(async (error) => {
+// Start the server first
+server.listen(PORT, '0.0.0.0', async () => {
+    console.log(chalk.blue(`Server started on port ${PORT}`));
+    
+    try {
+        // Initialize WhatsApp client after server is running
+        await client.initialize();
+        handleConnectionState('INITIALIZING');
+        setupKeepAlive();
+        setupMemoryManagement();
+        setupHealthCheck();
+        
+        // Set up persistent ping
+        setInterval(async () => {
+            if (isConnected) {
+                try {
+                    await axios.get(`http://localhost:${PORT}`);
+                } catch (error) {
+                    console.log(chalk.yellow('Keep-alive error (non-critical)'));
+                }
+            }
+        }, KEEPALIVE_INTERVAL);
+        
+    } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
         handleConnectionState('INITIALIZATION_FAILED');
         await reconnect();
-    });
+    }
+});
 
 // Graceful shutdown
 const shutdown = async () => {
