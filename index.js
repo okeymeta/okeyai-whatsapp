@@ -9,6 +9,8 @@ import http from 'http'; // Add this line
 import mongoose from 'mongoose'; // Add this line
 import { MongoStore } from 'wwebjs-mongo'; // Add this line
 import { EventEmitter } from 'events'; // Add this line
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -379,14 +381,19 @@ const client = new Client({
             '--disable-web-security',
             '--ignore-certificate-errors',
             '--ignore-certificate-errors-spki-list',
-            '--ignore-ssl-errors'
+            '--ignore-ssl-errors',
+            '--deterministic-fetch',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-site-isolation-trials'
         ],
-        headless: true,
+        headless: 'new', // Use new headless mode
         timeout: 0,
         defaultViewport: null,
         handleSIGINT: false,
         handleSIGTERM: false,
-        handleSIGHUP: false
+        handleSIGHUP: false,
+        executablePath: IS_RENDER ? '/usr/bin/google-chrome-stable' : undefined,
+        userDataDir: IS_RENDER ? '/tmp/puppeteer_data' : undefined
     },
     restartOnAuthFail: true,
     qrMaxRetries: 5,
@@ -721,17 +728,26 @@ const refreshWhatsAppPage = async () => {
 
 // Update the server creation
 const server = http.createServer((req, res) => {
-    res.writeHead(200, { 
+    // Add health check endpoint
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'healthy',
+            uptime: process.uptime(),
+            memory: process.memoryUsage(),
+            isConnected,
+            timestamp: new Date().toISOString()
+        }));
+        return;
+    }
+    
+    // Regular response
+    res.writeHead(200, {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
         'Keep-Alive': 'timeout=120'
     });
-    res.end(JSON.stringify({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        isConnected
-    }));
+    res.end(JSON.stringify({ status: 'ok' }));
 });
 
 // QR code event handler
