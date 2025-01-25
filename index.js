@@ -40,6 +40,10 @@ const AUTO_RESTART_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours
 const IDLE_PING_INTERVAL = 25000; // 25 seconds
 const ACTIVITY_SIMULATION_INTERVAL = 45000; // 45 seconds
 
+// Update constants
+const HEARTBEAT_INTERVAL = 10000; // 10 seconds for heartbeat
+const ACTIVE_PING_INTERVAL = 8000; // 8 seconds for active ping
+
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
 if (!fs.existsSync(SESSION_DIR)) {
@@ -494,12 +498,51 @@ const pingExternalUrl = async () => {
     }
 };
 
+// Add new keepalive function
+const maintainConnection = () => {
+    // Aggressive heartbeat
+    setInterval(() => {
+        console.log('Service heartbeat:', new Date().toISOString());
+        if (isConnected) {
+            try {
+                // Keep server active
+                axios.get(`http://localhost:${PORT}/ping`).catch(() => {});
+                // Keep WhatsApp connection active
+                client.sendPresenceAvailable();
+                // Simulate activity
+                if (client.pupPage) {
+                    client.pupPage.evaluate(() => {
+                        document.title = `Active ${Date.now()}`;
+                        window.dispatchEvent(new Event('focus'));
+                        window.dispatchEvent(new Event('mousemove'));
+                    });
+                }
+            } catch (error) {
+                // Ignore errors to keep running
+            }
+        }
+    }, HEARTBEAT_INTERVAL);
+
+    // Additional active ping
+    setInterval(() => {
+        if (isConnected) {
+            http.get(`http://0.0.0.0:${PORT}`, () => {});
+        }
+    }, ACTIVE_PING_INTERVAL);
+};
+
 // Update the server creation
 const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 
+        'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=120'
+    });
     res.end(JSON.stringify({
         status: 'ok',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        isConnected
     }));
 });
 
@@ -669,17 +712,7 @@ server.listen(PORT, '0.0.0.0', async () => {
         setupKeepAlive();
         setupMemoryManagement();
         setupHealthCheck();
-        
-        // Set up persistent ping
-        setInterval(async () => {
-            if (isConnected) {
-                try {
-                    await axios.get(`http://localhost:${PORT}`);
-                } catch (error) {
-                    console.log(chalk.yellow('Keep-alive error (non-critical)'));
-                }
-            }
-        }, KEEPALIVE_INTERVAL);
+        maintainConnection(); // Add the new aggressive keep-alive
         
     } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
@@ -727,10 +760,10 @@ process.on('unhandledRejection', (reason, promise) => {
     // Continue running but log the error
 });
 
-// Add this at the end of the file
+// Remove the old production heartbeat at the end of the file and replace with this:
 if (process.env.NODE_ENV === 'production') {
-    // Prevent Render from killing the process
-    setInterval(() => {
-        console.log('Service heartbeat:', new Date().toISOString());
-    }, 60000);
+    process.stdin.resume(); // Keep process running
+    process.on('SIGTERM', () => {
+        console.log('Received SIGTERM, keeping alive');
+    });
 }
