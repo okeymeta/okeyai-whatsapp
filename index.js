@@ -495,12 +495,11 @@ const pingExternalUrl = async () => {
 
 // Modify the HTTP server to include a more robust health check
 const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('OK');
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(chalk.blue(`HTTP server is listening on port ${PORT}`));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+        status: 'ok',
+        timestamp: Date.now()
+    }));
 });
 
 // QR code event handler
@@ -657,6 +656,8 @@ async function processMessageWithQueue(chat, message, processedContent) {
 
 // Initialize client with connection state handling
 console.log('Starting WhatsApp client...\n');
+let serverStarted = false;
+
 client.initialize()
     .then(() => {
         handleConnectionState('INITIALIZING');
@@ -664,10 +665,13 @@ client.initialize()
         setupMemoryManagement();
         setupHealthCheck(); // Add this line
         
-        // Start HTTP server immediately
-        server.listen(PORT, '0.0.0.0', () => {
-            console.log(chalk.blue(`Server active on port ${PORT}`));
-        });
+        // Only start server if not already started
+        if (!serverStarted) {
+            server.listen(PORT, '0.0.0.0', () => {
+                console.log(chalk.blue(`Server active on port ${PORT}`));
+                serverStarted = true;
+            });
+        }
         
         // Set up persistent ping
         setInterval(pingExternalUrl, KEEPALIVE_INTERVAL);
@@ -684,7 +688,9 @@ const shutdown = async () => {
     try {
         handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
-        server.close(); // Add this line
+        if (serverStarted) {
+            await new Promise(resolve => server.close(resolve));
+        }
         console.log(chalk.green('Successfully logged out and cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
