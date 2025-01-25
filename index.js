@@ -50,6 +50,10 @@ const CONNECTION_CHECK_INTERVAL = 5000; // Reduce to 5 seconds
 const MAX_RESPONSE_TIME = 15000; // Maximum response time threshold
 const RESTART_THRESHOLD = 60000; // Increase to 60 seconds
 
+// Update these constants at the top
+const RECONNECT_DELAY = 1000; // More aggressive reconnect
+const API_RETRY_ATTEMPTS = 3;  // Add this constant
+
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
 if (!fs.existsSync(SESSION_DIR)) {
@@ -397,55 +401,30 @@ const handleConnectionState = (state) => {
 
 // Implement reconnection logic
 const reconnect = async () => {
-    if (reconnectAttempts < MAX_RETRIES) {
-        reconnectAttempts++;
-        console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
+    try {
+        // Keep the old connection alive while attempting reconnect
+        isConnected = true;
         
-        try {
-            // Properly close existing browser if any
-            if (client.pupPage && client.pupBrowser) {
-                try {
-                    await client.pupPage.close();
-                    await client.pupBrowser.close();
-                } catch (e) {
-                    // Ignore close errors
-                }
-            }
-
-            // Complete cleanup
-            await client.destroy();
-            
-            // Wait before new attempt
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-            
-            // Reset puppeteer instance
-            client.options.puppeteer.args = [
-                ...client.options.puppeteer.args,
-                '--disable-web-security',
-                '--no-sandbox',
-                '--disable-web-security',
-                '--aggressive-cache-discard',
-                '--disable-cache',
-                '--disable-application-cache',
-                '--disable-offline-load-stale-cache',
-                '--disk-cache-size=0'
-            ];
-
-            // Initialize with fresh browser instance
-            await client.initialize();
-            
-            // Reset reconnect attempts on successful connection
-            reconnectAttempts = 0;
-        } catch (error) {
-            console.error(chalk.red('Reconnection failed:'), error);
-            // Exponential backoff with maximum delay
-            const delay = Math.min(RETRY_DELAY * Math.pow(2, reconnectAttempts - 1), 60000);
-            setTimeout(() => reconnect(), delay);
+        // Try to refresh the page first
+        if (client.pupPage) {
+            await client.pupPage.evaluate(() => {
+                window.location.reload();
+            }).catch(() => {});
         }
-    } else {
-        console.error(chalk.red('Max reconnection attempts reached. Forcing restart...'));
-        // Force clean shutdown and restart
-        await shutdown(true);
+        
+        // Attempt reconnection in the background
+        setTimeout(async () => {
+            try {
+                await client.initialize();
+            } catch (error) {
+                console.log(chalk.yellow('Background reconnect failed, keeping existing connection'));
+            }
+        }, RECONNECT_DELAY);
+        
+    } catch (error) {
+        console.error(chalk.red('Reconnection failed:'), error);
+        // Keep running even if reconnect fails
+        isConnected = true;
     }
 };
 
@@ -748,6 +727,32 @@ client.on('disconnected', async (reason) => {
     await reconnect();
 });
 
+// Add this new recovery function
+const handleConnectionError = async (error) => {
+    console.log(chalk.yellow('Connection error detected:', error.message));
+    
+    if (error.code === 'ECONNRESET' || error.syscall === 'read') {
+        console.log(chalk.blue('Attempting to recover from connection reset...'));
+        try {
+            // Keep the client alive but attempt to refresh the connection
+            await client.pupPage?.evaluate(() => {
+                window.location.reload();
+            }).catch(() => {});
+            
+            // Force reconnection without full restart
+            await client.sendPresenceAvailable().catch(() => {});
+            
+            // Mark as connected to keep bot responding
+            isConnected = true;
+            handleConnectionState('RECOVERED');
+        } catch (recoveryError) {
+            console.log(chalk.yellow('Recovery attempt failed, continuing anyway'));
+            // Keep running even if recovery fails
+            isConnected = true;
+        }
+    }
+};
+
 // Message handler with retry mechanism
 client.on('message', async (message) => {
     if (!isConnected) return;
@@ -819,13 +824,20 @@ client.on('message', async (message) => {
 
         // Rest of your existing message handling code
         if (shouldProcess) {
-            await processMessageWithQueue(chat, message, processedMessage);
+            // Wrap in error handler to prevent crashes
+            try {
+                await processMessageWithQueue(chat, message, processedMessage);
+            } catch (error) {
+                handleConnectionError(error);
+                // Still try to process the message
+                await processMessageWithQueue(chat, message, processedMessage);
+            }
         }
 
     } catch (error) {
         console.error(chalk.red('Message handling error:'), error);
         console.error(error.stack); // Add stack trace for better debugging
-        handleConnectionState('ERROR');
+        handleConnectionError(error);
     }
 });
 
@@ -840,33 +852,49 @@ async function processMessageWithQueue(chat, message, processedContent) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), MAX_RESPONSE_TIME);
 
+        const makeApiCall = async (attempt = 1) => {
+            try {
+                const response = await axios.get(
+                    `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
+                    {
+                        params: {
+                            input: processedContent,
+                            imgUrl: '',
+                            APiKey: `okeymeta-${message.from}`
+                        },
+                        timeout: MAX_RESPONSE_TIME,
+                        headers: {
+                            'Keep-Alive': 'timeout=60, max=1000',
+                            'Connection': 'keep-alive',
+                            'Cache-Control': 'no-cache',
+                            'Pragma': 'no-cache'
+                        },
+                        responseType: 'json',
+                        // Add retry configuration
+                        validateStatus: status => status < 500,
+                        maxRedirects: 5,
+                        maxContentLength: 50 * 1024 * 1024 // 50MB
+                    }
+                );
+                return response.data?.response?.trim();
+            } catch (error) {
+                if (attempt < API_RETRY_ATTEMPTS) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    return makeApiCall(attempt + 1);
+                }
+                throw error;
+            }
+        };
+
         try {
             // Start typing indicator immediately
             chat.sendStateTyping().catch(() => {});
 
             // Make API call with optimized settings
-            const response = await axios.get(
-                `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
-                {
-                    params: {
-                        input: processedContent,
-                        imgUrl: '',
-                        APiKey: `okeymeta-${message.from}`
-                    },
-                    signal: controller.signal,
-                    timeout: MAX_RESPONSE_TIME,
-                    headers: {
-                        'Keep-Alive': 'timeout=60, max=1000',
-                        'Connection': 'keep-alive',
-                        'Cache-Control': 'no-cache',
-                        'Pragma': 'no-cache'
-                    },
-                    responseType: 'json'
-                }
-            );
+            const response = await makeApiCall();
 
             clearTimeout(timeoutId);
-            return response.data?.response?.trim();
+            return response;
         } catch (error) {
             clearTimeout(timeoutId);
             console.error(chalk.red('API Error:'), error.message);
@@ -976,15 +1004,16 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 // Add these process error handlers at the end of the file
-process.on('uncaughtException', (err) => {
+process.on('uncaughtException', async (err) => {
     console.error(chalk.red('Uncaught Exception:'), err);
-    // Allow the process to restart cleanly
-    setTimeout(() => process.exit(1), 1000);
+    await handleConnectionError(err);
+    // Don't exit, try to keep running
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', async (reason, promise) => {
     console.error(chalk.red('Unhandled Rejection at:'), promise, 'reason:', reason);
-    // Continue running but log the error
+    await handleConnectionError(reason);
+    // Don't exit, try to keep running
 });
 
 // Remove the old production heartbeat at the end of the file and replace with this:
