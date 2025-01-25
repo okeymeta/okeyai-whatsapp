@@ -6,6 +6,8 @@ import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
 import http from 'http'; // Add this line
+import mongoose from 'mongoose'; // Add this line
+import { MongoStore } from 'wwebjs-mongo'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -327,11 +329,27 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
+// Add MongoDB connection constants
+const MONGODB_URI = process.env.MONGODB_URI || 'your_mongodb_atlas_uri_here';
+const DB_NAME = 'whatbot';
+const COLLECTION_NAME = 'sessions';
+
+// Add MongoDB connection and store setup
+let store;
+mongoose.connect(MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+}).then(() => {
+    console.log(chalk.green('Connected to MongoDB Atlas'));
+    store = new MongoStore({ mongoose: mongoose });
+});
+
 // Enhance client configuration
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'whatsapp-bot',
-        dataPath: SESSION_DIR
+        dataPath: SESSION_DIR,
+        store: store
     }),
     puppeteer: {
         args: [
@@ -346,7 +364,12 @@ const client = new Client({
             '--disable-default-apps',
             '--disable-sync',
             '--no-zygote',
-            '--single-process'
+            '--single-process',
+            '--aggressive-cache-discard', // Add this line
+            '--disable-cache', // Add this line
+            '--disable-application-cache', // Add this line
+            '--disable-offline-load-stale-cache', // Add this line
+            '--disk-cache-size=0' // Add this line
         ],
         headless: true,
         timeout: 0,
@@ -500,35 +523,30 @@ const pingExternalUrl = async () => {
 
 // Add new keepalive function
 const maintainConnection = () => {
-    // Aggressive heartbeat
-    setInterval(() => {
+    let lastPing = Date.now();
+    
+    setInterval(async () => {
+        const now = Date.now();
         console.log('Service heartbeat:', new Date().toISOString());
+        
         if (isConnected) {
             try {
                 // Keep server active
-                axios.get(`http://localhost:${PORT}/ping`).catch(() => {});
-                // Keep WhatsApp connection active
-                client.sendPresenceAvailable();
-                // Simulate activity
-                if (client.pupPage) {
-                    client.pupPage.evaluate(() => {
-                        document.title = `Active ${Date.now()}`;
-                        window.dispatchEvent(new Event('focus'));
-                        window.dispatchEvent(new Event('mousemove'));
-                    });
+                await axios.get(`http://localhost:${PORT}/ping`);
+                await client.sendPresenceAvailable();
+                
+                // Force reconnect if no ping for too long
+                if (now - lastPing > 30000) {
+                    console.log(chalk.yellow('No recent ping, refreshing connection...'));
+                    await client.pupPage?.reload().catch(() => {});
                 }
+                
+                lastPing = now;
             } catch (error) {
-                // Ignore errors to keep running
+                console.log(chalk.yellow('Connection maintenance error:', error.message));
             }
         }
-    }, HEARTBEAT_INTERVAL);
-
-    // Additional active ping
-    setInterval(() => {
-        if (isConnected) {
-            http.get(`http://0.0.0.0:${PORT}`, () => {});
-        }
-    }, ACTIVE_PING_INTERVAL);
+    }, 5000); // More frequent checks
 };
 
 // Update the server creation
@@ -674,6 +692,9 @@ async function processMessageWithQueue(chat, message, processedContent) {
         body: processedContent
     }, async () => {
         try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000);
+
             const response = await axios.get(
                 `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
                 {
@@ -682,13 +703,15 @@ async function processMessageWithQueue(chat, message, processedContent) {
                         imgUrl: '',
                         APiKey: `okeymeta-${message.from}`
                     },
-                    timeout: 30000, // Reduced timeout
+                    signal: controller.signal,
                     headers: {
-                        'Keep-Alive': 'timeout=30, max=1000'
+                        'Keep-Alive': 'timeout=30, max=1000',
+                        'Connection': 'keep-alive'
                     }
                 }
             );
 
+            clearTimeout(timeoutId);
             return response.data?.response?.trim() || 
                    "I apologize, but I couldn't process that request properly.";
         } catch (error) {
@@ -713,6 +736,14 @@ server.listen(PORT, '0.0.0.0', async () => {
         setupMemoryManagement();
         setupHealthCheck();
         maintainConnection(); // Add the new aggressive keep-alive
+        
+        // Additional connection monitoring
+        setInterval(() => {
+            if (!isConnected) {
+                console.log(chalk.yellow('Connection check failed, attempting reconnect...'));
+                reconnect();
+            }
+        }, 15000);
         
     } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
