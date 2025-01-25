@@ -9,6 +9,7 @@ import http from 'http'; // Add this line
 import mongoose from 'mongoose'; // Add this line
 import { MongoStore } from 'wwebjs-mongo'; // Add this line
 import { EventEmitter } from 'events'; // Add this line
+import express from 'express'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -55,6 +56,10 @@ const API_RETRY_ATTEMPTS = 3;  // Add this constant
 const MAX_LISTENERS = 25; // Increase max listeners limit
 const RENDER_RESTART_DELAY = 2000; // 2 seconds delay before restart
 const KEEP_ALIVE_PORT = process.env.PORT || 10000;
+
+// Add new constants
+const RENDER_PING_INTERVAL = 25000; // 25 seconds
+const app = express();
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -959,10 +964,21 @@ server.listen(PORT, '0.0.0.0', async () => {
     try {
         setupEventEmitterDefaults(); // Add this line
         setupRenderKeepAlive(); // Add Render-specific keepalive
+        await setupServerless(); // Add this line
         
-        // Initialize WhatsApp client after server is running
-        await client.initialize();
-        handleConnectionState('INITIALIZING');
+        // Try to restore session from Supabase
+        const { data } = await supabase
+            .from('sessions')
+            .select('data')
+            .eq('id', 'whatsapp-session')
+            .single();
+
+        if (data?.data) {
+            await client.initialize(data.data);
+        } else {
+            await client.initialize();
+        }
+        
         setupKeepAlive();
         setupMemoryManagement();
         setupHealthCheck();
@@ -993,6 +1009,12 @@ const shutdown = async (forceRestart = false) => {
         console.log(chalk.blue('Production shutdown detected, triggering restart...'));
         
         try {
+            // Store state before shutdown
+            await supabase.from('sessions').upsert({
+                id: 'whatsapp-session',
+                status: 'restarting'
+            });
+            
             // Cleanup
             if (client.pupPage) await client.pupPage.close().catch(() => {});
             if (client.pupBrowser) await client.pupBrowser.close().catch(() => {});
@@ -1171,4 +1193,91 @@ if (process.env.NODE_ENV === 'production') {
         console.log('Deployment signal received, restarting...');
         shutdown(true);
     });
+}
+
+// Add new function to handle serverless operation
+const setupServerless = async () => {
+    if (process.env.NODE_ENV === 'production') {
+        // Store authentication state
+        client.on('authenticated', async (session) => {
+            await supabase.from('sessions').upsert({
+                id: 'whatsapp-session',
+                data: session,
+                status: 'authenticated'
+            });
+        });
+
+        // Keep serverless function warm
+        setInterval(() => {
+            axios.get(`${SERVERLESS_URL}/api/status`)
+                .catch(() => {}); // Ignore errors
+        }, 30000);
+    }
+};
+
+// Add express middleware for better uptime
+app.get('/', (req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+app.get('/ping', (req, res) => {
+    res.send('pong');
+});
+
+// Add new function to keep Render alive
+const keepRenderAlive = () => {
+    setInterval(() => {
+        http.get(`http://localhost:${PORT}/ping`).end();
+    }, RENDER_PING_INTERVAL);
+};
+
+// Update server initialization
+const startServer = async () => {
+    try {
+        // Start express app
+        app.listen(PORT, '0.0.0.0', () => {
+            console.log(chalk.blue(`Server started on port ${PORT}`));
+        });
+
+        setupEventEmitterDefaults();
+        await client.initialize();
+        
+        // Setup all monitors
+        setupKeepAlive();
+        setupMemoryManagement();
+        setupHealthCheck();
+        maintainConnection();
+        setupBrowserMonitoring();
+        monitorConnection();
+        setupPersistentConnection();
+        keepRenderAlive(); // Add Render keep-alive
+
+        // Handle Render signals
+        process.on('SIGTERM', () => {
+            console.log('Received SIGTERM - Keeping alive');
+            // Don't exit, just acknowledge
+        });
+    } catch (error) {
+        console.error(chalk.red('Initialization failed:'), error);
+        // Wait and retry instead of exiting
+        setTimeout(() => startServer(), 5000);
+    }
+};
+
+// Start the server
+startServer();
+
+// Add at the end
+if (process.env.NODE_ENV === 'production') {
+    // Prevent any kind of shutdown in production
+    ['SIGTERM', 'SIGINT', 'SIGUSR1', 'SIGUSR2'].forEach(signal => {
+        process.on(signal, () => {
+            console.log(`Received ${signal} - Keeping process alive`);
+        });
+    });
+
+    // Keep process running
+    setInterval(() => {
+        console.log('Heartbeat:', new Date().toISOString());
+    }, 30000);
 }
