@@ -55,7 +55,6 @@ const RECONNECT_DELAY = 1000; // More aggressive reconnect
 const API_RETRY_ATTEMPTS = 3;  // Add this constant
 const MAX_LISTENERS = 25; // Increase max listeners limit
 const RENDER_RESTART_DELAY = 2000; // 2 seconds delay before restart
-const KEEP_ALIVE_PORT = process.env.PORT || 10000;
 
 // Add new constants
 const RENDER_PING_INTERVAL = 25000; // 25 seconds
@@ -749,9 +748,20 @@ client.on('qr', (qr) => {
 });
 
 // Authentication event handlers
-client.on('authenticated', () => {
+client.on('authenticated', async (session) => {
     console.log(chalk.green('WhatsApp authentication successful!\n'));
     handleConnectionState('AUTHENTICATED');
+    
+    // Store session in MongoDB
+    await Session.findOneAndUpdate(
+        { id: 'whatsapp-session' },
+        { 
+            data: session,
+            status: 'authenticated',
+            updatedAt: new Date()
+        },
+        { upsert: true }
+    );
 });
 
 client.on('auth_failure', async (message) => {
@@ -953,17 +963,11 @@ server.listen(PORT, '0.0.0.0', async () => {
     try {
         setupEventEmitterDefaults(); // Add this line
         setupRenderKeepAlive(); // Add Render-specific keepalive
-        await setupServerless(); // Add this line
         
-        // Try to restore session from Supabase
-        const { data } = await supabase
-            .from('sessions')
-            .select('data')
-            .eq('id', 'whatsapp-session')
-            .single();
-
-        if (data?.data) {
-            await client.initialize(data.data);
+        // Try to restore session from MongoDB
+        const savedSession = await Session.findOne({ id: 'whatsapp-session' });
+        if (savedSession?.data) {
+            await client.initialize(savedSession.data);
         } else {
             await client.initialize();
         }
@@ -998,11 +1002,12 @@ const shutdown = async (forceRestart = false) => {
         console.log(chalk.blue('Production shutdown detected, triggering restart...'));
         
         try {
-            // Store state before shutdown
-            await supabase.from('sessions').upsert({
-                id: 'whatsapp-session',
-                status: 'restarting'
-            });
+            // Store state in MongoDB
+            await Session.findOneAndUpdate(
+                { id: 'whatsapp-session' },
+                { status: 'restarting' },
+                { upsert: true }
+            );
             
             // Cleanup
             if (client.pupPage) await client.pupPage.close().catch(() => {});
@@ -1132,26 +1137,6 @@ if (process.env.NODE_ENV === 'production') {
         shutdown(true);
     });
 }
-
-// Add new function to handle serverless operation
-const setupServerless = async () => {
-    if (process.env.NODE_ENV === 'production') {
-        // Store authentication state
-        client.on('authenticated', async (session) => {
-            await supabase.from('sessions').upsert({
-                id: 'whatsapp-session',
-                data: session,
-                status: 'authenticated'
-            });
-        });
-
-        // Keep serverless function warm
-        setInterval(() => {
-            axios.get(`${SERVERLESS_URL}/api/status`)
-                .catch(() => {}); // Ignore errors
-        }, 30000);
-    }
-};
 
 // Add express middleware for better uptime
 app.get('/', (req, res) => {
