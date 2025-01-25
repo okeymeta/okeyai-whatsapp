@@ -27,7 +27,7 @@ const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
 
 // Add new constants
-const KEEPALIVE_INTERVAL = 5000; // Reduced to 5 seconds
+const KEEPALIVE_INTERVAL = 3000; // Reduce to 3 seconds
 const MEMORY_CHECK_INTERVAL = 300000; // 5 minutes
 const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB limit
 const PORT = process.env.PORT || 10000; // Match Render's detected port
@@ -46,8 +46,9 @@ const ACTIVITY_SIMULATION_INTERVAL = 45000; // 45 seconds
 const HEARTBEAT_INTERVAL = 10000; // 10 seconds for heartbeat
 const ACTIVE_PING_INTERVAL = 8000; // 8 seconds for active ping
 const BROWSER_CHECK_INTERVAL = 3000; // Check browser every 3 seconds
-const CONNECTION_CHECK_INTERVAL = 10000; // Check connection every 10 seconds
+const CONNECTION_CHECK_INTERVAL = 5000; // Reduce to 5 seconds
 const MAX_RESPONSE_TIME = 15000; // Maximum response time threshold
+const RESTART_THRESHOLD = 30000; // 30 seconds threshold for forced restart
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -616,6 +617,49 @@ const setupBrowserMonitoring = () => {
     }, BROWSER_CHECK_INTERVAL);
 };
 
+// Add this new connection monitoring function
+const monitorConnection = () => {
+    let lastActivity = Date.now();
+    
+    setInterval(async () => {
+        const inactiveTime = Date.now() - lastActivity;
+        
+        if (isConnected && client.pupPage) {
+            try {
+                // Verify connection is truly alive
+                const isAlive = await client.pupPage.evaluate(() => navigator.onLine);
+                if (isAlive) {
+                    lastActivity = Date.now();
+                } else {
+                    throw new Error('Browser reports offline');
+                }
+            } catch (error) {
+                console.log(chalk.yellow('Connection check failed:', error.message));
+                if (inactiveTime > RESTART_THRESHOLD) {
+                    console.log(chalk.red('Connection dead, forcing restart...'));
+                    await reconnect();
+                }
+            }
+        }
+    }, CONNECTION_CHECK_INTERVAL);
+
+    // Add active keep-alive pings
+    setInterval(async () => {
+        if (isConnected && client.pupPage) {
+            try {
+                await client.sendPresenceAvailable();
+                await client.pupPage.evaluate(() => {
+                    window.focus();
+                    document.dispatchEvent(new Event('mousemove'));
+                });
+                lastActivity = Date.now();
+            } catch (error) {
+                console.log(chalk.yellow('Keep-alive failed:', error.message));
+            }
+        }
+    }, KEEPALIVE_INTERVAL);
+};
+
 // Update the server creation
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 
@@ -812,6 +856,7 @@ server.listen(PORT, '0.0.0.0', async () => {
         setupHealthCheck();
         maintainConnection(); // Add the new aggressive keep-alive
         setupBrowserMonitoring(); // Add browser monitoring
+        monitorConnection(); // Add the new monitoring
         
         // Additional connection monitoring with longer interval
         setInterval(() => {
@@ -830,7 +875,19 @@ server.listen(PORT, '0.0.0.0', async () => {
 
 // Graceful shutdown
 const shutdown = async (forceRestart = false) => {
-    console.log(chalk.yellow('\nShutting down...'));
+    // Prevent multiple shutdown attempts
+    if (global.isShuttingDown) return;
+    global.isShuttingDown = true;
+
+    console.log(chalk.yellow('\nShutdown requested...'));
+    
+    // Only actually shutdown if it's a real termination request
+    if (!forceRestart && process.env.NODE_ENV === 'production') {
+        console.log(chalk.blue('Production environment detected, keeping alive...'));
+        global.isShuttingDown = false;
+        return;
+    }
+
     try {
         handleConnectionState('SHUTTING_DOWN');
         
@@ -857,10 +914,13 @@ const shutdown = async (forceRestart = false) => {
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
         handleConnectionState('SHUTDOWN_ERROR');
+    } finally {
+        global.isShuttingDown = false;
     }
     
-    // Exit with different codes for restart vs shutdown
-    process.exit(forceRestart ? 1 : 0);
+    if (forceRestart) {
+        process.exit(1); // Force restart
+    }
 };
 
 process.on('SIGINT', shutdown);
