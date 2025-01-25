@@ -8,6 +8,7 @@ import sharp from 'sharp'; // Add this line
 import http from 'http'; // Add this line
 import mongoose from 'mongoose'; // Add this line
 import { MongoStore } from 'wwebjs-mongo'; // Add this line
+import { EventEmitter } from 'events'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -39,12 +40,12 @@ const PING_INTERVAL = 4 * 60 * 1000; // 4 minutes
 const AUTO_RESTART_INTERVAL = 24 * 60 * 60 * 1000; // Extend to 24 hours
 
 // Add new constants after other constants
-const IDLE_PING_INTERVAL = 25000; // 25 seconds
-const ACTIVITY_SIMULATION_INTERVAL = 45000; // 45 seconds
+const WHATSAPP_REFRESH_INTERVAL = 30 * 60 * 1000; // 30 minutes
+const PRESENCE_REFRESH_INTERVAL = 15000; // 15 seconds
+const CONNECTION_RECOVERY_ATTEMPTS = 3;
 
 // Update constants
 const HEARTBEAT_INTERVAL = 10000; // 10 seconds for heartbeat
-const ACTIVE_PING_INTERVAL = 8000; // 8 seconds for active ping
 const BROWSER_CHECK_INTERVAL = 3000; // Check browser every 3 seconds
 const CONNECTION_CHECK_INTERVAL = 5000; // Reduce to 5 seconds
 const MAX_RESPONSE_TIME = 15000; // Maximum response time threshold
@@ -53,6 +54,7 @@ const RESTART_THRESHOLD = 60000; // Increase to 60 seconds
 // Update these constants at the top
 const RECONNECT_DELAY = 1000; // More aggressive reconnect
 const API_RETRY_ATTEMPTS = 3;  // Add this constant
+const MAX_LISTENERS = 25; // Increase max listeners limit
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -377,16 +379,27 @@ const client = new Client({
             '--disable-cache', // Add this line
             '--disable-application-cache', // Add this line
             '--disable-offline-load-stale-cache', // Add this line
-            '--disk-cache-size=0' // Add this line
+            '--disk-cache-size=0', // Add this line
+            '--disable-web-security',
+            '--ignore-certificate-errors',
+            '--ignore-certificate-errors-spki-list',
+            '--ignore-ssl-errors'
         ],
         headless: true,
         timeout: 0,
-        defaultViewport: null
+        defaultViewport: null,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false
     },
     restartOnAuthFail: true,
     qrMaxRetries: 5,
     takeoverOnConflict: true,
-    takeoverTimeoutMs: 0
+    takeoverTimeoutMs: 0,
+    webVersionCache: {
+        type: 'local',
+        path: './.wwebjs_cache'
+    }
 });
 
 // Connection status tracking
@@ -401,58 +414,49 @@ const handleConnectionState = (state) => {
 
 // Implement reconnection logic
 const reconnect = async () => {
-    try {
-        // Keep the old connection alive while attempting reconnect
-        isConnected = true;
-        
-        // Try to refresh the page first
-        if (client.pupPage) {
-            await client.pupPage.evaluate(() => {
-                window.location.reload();
-            }).catch(() => {});
-        }
-        
-        // Attempt reconnection in the background
-        setTimeout(async () => {
-            try {
-                await client.initialize();
-            } catch (error) {
-                console.log(chalk.yellow('Background reconnect failed, keeping existing connection'));
+    let attempts = 0;
+    
+    while (attempts < CONNECTION_RECOVERY_ATTEMPTS) {
+        try {
+            attempts++;
+            
+            // Try to refresh the page first
+            if (client.pupPage) {
+                await refreshWhatsAppPage();
+                if (await safePresenceUpdate()) {
+                    console.log(chalk.green('Connection recovered successfully'));
+                    return;
+                }
             }
-        }, RECONNECT_DELAY);
-        
-    } catch (error) {
-        console.error(chalk.red('Reconnection failed:'), error);
-        // Keep running even if reconnect fails
-        isConnected = true;
+
+            // If refresh fails, try full reconnect
+            await client.initialize();
+            return;
+        } catch (error) {
+            console.log(chalk.yellow(`Reconnection attempt ${attempts} failed`));
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
     }
+    
+    // Keep the connection alive even if reconnect fails
+    isConnected = true;
 };
 
 // Add keepalive and memory management functions
 const setupKeepAlive = () => {
-    // Aggressive keep-alive strategy
+    // Regular presence updates
     setInterval(async () => {
         if (isConnected) {
-            try {
-                // Send WhatsApp presence
-                await client.sendPresenceAvailable();
-                
-                // Ping our own endpoint
-                await pingExternalUrl();
-                
-                // Force browser activity
-                if (client.pupPage) {
-                    await client.pupPage.evaluate(() => {
-                        document.title = `Active - ${Date.now()}`;
-                        window.dispatchEvent(new Event('focus'));
-                        window.dispatchEvent(new Event('mousemove'));
-                    });
-                }
-            } catch (error) {
-                console.log(chalk.yellow('Keep-alive cycle error (non-critical):', error.message));
-            }
+            await safePresenceUpdate().catch(() => {});
         }
-    }, KEEPALIVE_INTERVAL);
+    }, PRESENCE_REFRESH_INTERVAL);
+
+    // Periodic WhatsApp refresh
+    setInterval(async () => {
+        if (isConnected) {
+            await refreshWhatsAppPage();
+        }
+    }, WHATSAPP_REFRESH_INTERVAL);
 };
 
 const setupMemoryManagement = () => {
@@ -672,6 +676,73 @@ const setupPersistentConnection = () => {
     setInterval(() => {
         if (!keepAliveInterval) startKeepAlive();
     }, 5000);
+};
+
+// Add this new presence update function
+const safePresenceUpdate = async () => {
+    if (!client.pupPage) return false;
+    
+    try {
+        // First try the Store method
+        const storePresence = await client.pupPage.evaluate(() => {
+            if (window.Store && window.Store.PresenceUtils) {
+                window.Store.PresenceUtils.sendPresenceAvailable();
+                return true;
+            }
+            return false;
+        });
+
+        if (storePresence) return true;
+
+        // Fallback to client method
+        await client.sendPresenceAvailable();
+        return true;
+    } catch (error) {
+        // If presence fails, try to refresh WhatsApp
+        await refreshWhatsAppPage();
+        return false;
+    }
+};
+
+// Add this function near the top
+const setupEventEmitterDefaults = () => {
+    // Increase max listeners globally
+    EventEmitter.defaultMaxListeners = MAX_LISTENERS;
+    // Increase for process specifically
+    process.setMaxListeners(MAX_LISTENERS);
+};
+
+// Add new WhatsApp page refresh function
+const refreshWhatsAppPage = async () => {
+    if (!client.pupPage) return;
+    
+    try {
+        // Store session data
+        const sessionData = await client.pupPage.evaluate(() => {
+            return localStorage.getItem('WAWebSessionData');
+        });
+
+        // Refresh the page
+        await client.pupPage.reload({ waitUntil: 'networkidle0', timeout: 60000 });
+
+        // Restore session after reload
+        if (sessionData) {
+            await client.pupPage.evaluate((data) => {
+                localStorage.setItem('WAWebSessionData', data);
+            }, sessionData);
+        }
+
+        // Ensure WhatsApp is ready
+        await client.pupPage.waitForFunction(() => {
+            return window.Store && window.Store.PresenceUtils;
+        }, { timeout: 30000 });
+
+        console.log(chalk.green('WhatsApp Web refreshed successfully'));
+        isConnected = true;
+    } catch (error) {
+        console.log(chalk.yellow('WhatsApp refresh failed, attempting recovery...'));
+        await reconnect();
+    }
 };
 
 // Update the server creation
@@ -911,6 +982,8 @@ server.listen(PORT, '0.0.0.0', async () => {
     console.log(chalk.blue(`Server started on port ${PORT}`));
     
     try {
+        setupEventEmitterDefaults(); // Add this line
+        
         // Initialize WhatsApp client after server is running
         await client.initialize();
         handleConnectionState('INITIALIZING');
