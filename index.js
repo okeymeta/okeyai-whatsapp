@@ -498,29 +498,38 @@ async function processMessageWithQueue(chat, message, processedContent) {
     });
 }
 
-// Initialize client with connection state handling
-console.log('Starting WhatsApp client...\n');
-const PORT = process.env.PORT || 3000; // Add this line
-
-// Create a simple HTTP server
+// Initialize HTTP server first
+const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('WhatsApp Bot is running!');
 });
 
-// Update server to listen on all network interfaces
-server.listen(PORT, '0.0.0.0', () => {
+// Start server and wait for it to be ready before initializing WhatsApp client
+server.listen(PORT, '0.0.0.0', async () => {
     console.log(`Server is running on http://0.0.0.0:${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-});
-
-client.initialize()
-    .then(() => handleConnectionState('INITIALIZING'))
-    .catch(async (error) => {
+    
+    // Initialize WhatsApp client after server is running
+    console.log('Starting WhatsApp client...\n');
+    try {
+        await client.initialize();
+        handleConnectionState('INITIALIZING');
+    } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
         handleConnectionState('INITIALIZATION_FAILED');
         await reconnect();
-    });
+    }
+});
+
+// Add error handler for the server
+server.on('error', (error) => {
+    console.error(chalk.red('Server error:'), error);
+    if (error.code === 'EADDRINUSE') {
+        console.error(chalk.red(`Port ${PORT} is already in use`));
+        process.exit(1);
+    }
+});
 
 // Modify the shutdown handler to work with PM2
 const shutdown = async (signal) => {
