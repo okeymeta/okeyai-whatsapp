@@ -5,6 +5,7 @@ import whatsappweb from 'whatsapp-web.js';
 import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
+import http from 'http'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -499,6 +500,20 @@ async function processMessageWithQueue(chat, message, processedContent) {
 
 // Initialize client with connection state handling
 console.log('Starting WhatsApp client...\n');
+const PORT = process.env.PORT || 3000; // Add this line
+
+// Create a simple HTTP server
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('WhatsApp Bot is running!');
+});
+
+// Update server to listen on all network interfaces
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running on http://0.0.0.0:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
 client.initialize()
     .then(() => handleConnectionState('INITIALIZING'))
     .catch(async (error) => {
