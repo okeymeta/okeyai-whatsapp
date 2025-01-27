@@ -1,12 +1,12 @@
 services:
-  - type: worker
-    name: whatsapp-bot
+  - type: web
+    name: whatbot
     env: node
     buildCommand: npm install
-    startCommand: node index.js
+    startCommand: npm run render-start
     envVars:
       - key: NODE_VERSION
-        value: 18.16.0
+        value: 18.x
       - key: IS_RENDER
         value: true
       - key: NODE_ENV

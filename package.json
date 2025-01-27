@@ -3,12 +3,18 @@
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "pm2:start": "npm install pm2 -g && pm2 start ecosystem.config.cjs",
+    "render-start": "node index.js"
+  },
   "dependencies": {
     "axios": "latest",
     "chalk": "latest",
     "qrcode-terminal": "latest",
     "whatsapp-web.js": "latest",
     "sharp": "latest",
-    "jimp": "latest"
+    "jimp": "latest",
+    "pm2": "latest"
   }
 }
