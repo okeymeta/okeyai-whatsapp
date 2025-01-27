@@ -15,6 +15,8 @@
     "whatsapp-web.js": "latest",
     "sharp": "latest",
     "jimp": "latest",
-    "pm2": "latest"
+    "pm2": "latest",
+    "mongoose": "^6.9.1",
+    "wwebjs-mongo": "^1.1.0"
   }
 }

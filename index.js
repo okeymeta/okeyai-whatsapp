@@ -6,6 +6,8 @@ import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
 import http from 'http'; // Add this line
+import mongoose from 'mongoose'; // Add this
+import { MongoStore } from 'wwebjs-mongo'; // Add this
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -29,6 +31,9 @@ const SESSION_DIR = './.wwebjs_auth';
 if (!fs.existsSync(SESSION_DIR)) {
     fs.mkdirSync(SESSION_DIR, { recursive: true });
 }
+
+// Add MongoDB URL (add this near the top with other constants)
+const MONGODB_URI = 'mongodb+srv://<username>:<password>@<cluster>.mongodb.net/whatbot?retryWrites=true&w=majority';
 
 // Add these utility functions before MessageQueue class
 const splitMessage = (text) => {
@@ -306,17 +311,113 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
-// Instantiate new WhatsApp client with persistent session
+// Add MongoDB connection and store setup
+let store;
+
+mongoose.connect(MONGODB_URI).then(() => {
+    console.log(chalk.green('Connected to MongoDB Atlas'));
+    store = new MongoStore({ mongoose: mongoose });
+});
+
+// Update client initialization with remote auth
 const client = new Client({
-    authStrategy: new LocalAuth({
+    authStrategy: new RemoteAuth({
         clientId: 'whatsapp-bot',
-        dataPath: SESSION_DIR
+        store: store,
+        backupSyncIntervalMs: 300000 // Backup every 5 minutes
     }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        headless: true
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ],
+        headless: true,
+        timeout: 0
     },
-    restartOnAuthFail: true
+    restartOnAuthFail: true,
+    refreshQR: 30000,
+    qrMaxRetries: 5,
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 10000
+});
+
+// Add session refresh mechanism
+const SESSION_REFRESH_INTERVAL = 1800000; // 30 minutes
+setInterval(async () => {
+    if (isConnected) {
+        try {
+            await client.resetState();
+            console.log(chalk.blue('Session refreshed'));
+        } catch (error) {
+            console.error(chalk.red('Session refresh failed:'), error);
+        }
+    }
+}, SESSION_REFRESH_INTERVAL);
+
+// Add keep-alive ping
+const PING_INTERVAL = 45000; // 45 seconds
+let pingServer;
+
+const startPingServer = () => {
+    if (pingServer) clearInterval(pingServer);
+    pingServer = setInterval(async () => {
+        try {
+            const response = await axios.get(`http://0.0.0.0:${PORT}/ping`);
+            console.log(chalk.gray('Ping successful:', response.status));
+        } catch (error) {
+            console.error(chalk.red('Ping failed:'), error.message);
+        }
+    }, PING_INTERVAL);
+};
+
+// Enhanced server setup with health check endpoint
+const server = http.createServer((req, res) => {
+    if (req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            uptime: process.uptime(),
+            connected: isConnected,
+            queueSize: messageQueue.queue.size
+        }));
+    } else {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('WhatsApp Bot is running!');
+    }
+});
+
+// Enhanced connection monitoring
+const CONNECTION_CHECK_INTERVAL = 60000; // 1 minute
+setInterval(async () => {
+    if (!isConnected) {
+        console.log(chalk.yellow('Connection check: Disconnected, attempting reconnect...'));
+        try {
+            await reconnect();
+        } catch (error) {
+            console.error(chalk.red('Reconnection failed:'), error);
+        }
+    }
+}, CONNECTION_CHECK_INTERVAL);
+
+// Update server initialization
+server.listen(PORT, '0.0.0.0', async () => {
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    startPingServer();
+    
+    try {
+        await client.initialize();
+        handleConnectionState('INITIALIZING');
+    } catch (error) {
+        console.error(chalk.red('Initialization failed:'), error);
+        handleConnectionState('INITIALIZATION_FAILED');
+        await reconnect();
+    }
 });
 
 // Connection status tracking
@@ -500,27 +601,6 @@ async function processMessageWithQueue(chat, message, processedContent) {
 
 // Initialize HTTP server first
 const PORT = process.env.PORT || 3000;
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('WhatsApp Bot is running!');
-});
-
-// Start server and wait for it to be ready before initializing WhatsApp client
-server.listen(PORT, '0.0.0.0', async () => {
-    console.log(`Server is running on http://0.0.0.0:${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    
-    // Initialize WhatsApp client after server is running
-    console.log('Starting WhatsApp client...\n');
-    try {
-        await client.initialize();
-        handleConnectionState('INITIALIZING');
-    } catch (error) {
-        console.error(chalk.red('Initialization failed:'), error);
-        handleConnectionState('INITIALIZATION_FAILED');
-        await reconnect();
-    }
-});
 
 // Add error handler for the server
 server.on('error', (error) => {
@@ -531,40 +611,48 @@ server.on('error', (error) => {
     }
 });
 
-// Modify the shutdown handler to work with PM2
-const shutdown = async (signal) => {
-    console.log(chalk.yellow(`\nReceived ${signal}. Shutting down...`));
-    try {
-        handleConnectionState('SHUTTING_DOWN');
-        await client.destroy();
-        console.log(chalk.green('Successfully logged out and cleaned up.'));
-    } catch (error) {
-        console.error(chalk.red('Error during shutdown:'), error);
-        handleConnectionState('SHUTDOWN_ERROR');
-    }
-    // Only exit if not running under PM2
-    if (!process.env.PM2_USAGE) {
-        process.exit(0);
-    }
-};
+// Remove the shutdown function entirely and replace with persistent connection handlers
+process.on('SIGINT', () => {
+    console.log(chalk.yellow('Keeping bot online, use process kill for force shutdown'));
+});
 
-// Update signal handlers
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGTERM', () => {
+    console.log(chalk.yellow('Keeping bot online, use process kill for force shutdown'));
+});
 
-// Add handlers for uncaught exceptions and unhandled rejections
-process.on('uncaughtException', (error) => {
+// Enhance error handlers to maintain connection
+process.on('uncaughtException', async (error) => {
     console.error(chalk.red('Uncaught Exception:'), error);
-    // Attempt to reconnect client if possible
     if (!isConnected) {
-        reconnect();
+        try {
+            await reconnect();
+        } catch (err) {
+            console.error(chalk.red('Reconnection failed, retrying in 30s...'));
+            setTimeout(reconnect, 30000);
+        }
     }
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', async (reason, promise) => {
     console.error(chalk.red('Unhandled Rejection at:'), promise, 'reason:', reason);
-    // Attempt to reconnect client if possible
     if (!isConnected) {
-        reconnect();
+        try {
+            await reconnect();
+        } catch (err) {
+            console.error(chalk.red('Reconnection failed, retrying in 30s...'));
+            setTimeout(reconnect, 30000);
+        }
     }
 });
+
+// Add automatic recovery on connection loss
+setInterval(async () => {
+    if (!isConnected) {
+        console.log(chalk.yellow('Connection check: Attempting to restore connection...'));
+        try {
+            await client.initialize();
+        } catch (error) {
+            console.error(chalk.red('Auto-recovery failed, will retry...'));
+        }
+    }
+}, 30000);
