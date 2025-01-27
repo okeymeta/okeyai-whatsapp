@@ -1,4 +1,5 @@
-export default {
+
+module.exports = {
   apps: [{
     name: "whatbot",
     script: "index.js",

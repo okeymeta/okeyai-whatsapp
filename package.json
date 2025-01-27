@@ -1,0 +1,14 @@
+{
+  "name": "whatbot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "axios": "latest",
+    "chalk": "latest",
+    "qrcode-terminal": "latest",
+    "whatsapp-web.js": "latest",
+    "sharp": "latest",
+    "jimp": "latest"
+  }
+}
