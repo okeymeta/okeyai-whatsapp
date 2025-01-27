@@ -11,9 +11,6 @@ const Jimp = require('jimp'); // Direct require without destructuring
 
 const { Client, LocalAuth, MessageMedia } = whatsappweb;
 
-// Add near the top of the file, after imports
-const PORT = process.env.PORT || 3000;
-
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
@@ -510,7 +507,7 @@ client.initialize()
         await reconnect();
     });
 
-// Modify the shutdown handler - remove PM2-specific code
+// Modify the shutdown handler to work with PM2
 const shutdown = async (signal) => {
     console.log(chalk.yellow(`\nReceived ${signal}. Shutting down...`));
     try {
@@ -521,7 +518,10 @@ const shutdown = async (signal) => {
         console.error(chalk.red('Error during shutdown:'), error);
         handleConnectionState('SHUTDOWN_ERROR');
     }
-    process.exit(0);
+    // Only exit if not running under PM2
+    if (!process.env.PM2_USAGE) {
+        process.exit(0);
+    }
 };
 
 // Update signal handlers
@@ -543,17 +543,4 @@ process.on('unhandledRejection', (reason, promise) => {
     if (!isConnected) {
         reconnect();
     }
-});
-
-// Add at the bottom of the file
-// Basic HTTP server to keep the service alive
-import http from 'http';
-
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('WhatsApp Bot Server Running\n');
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(chalk.green(`Server running on http://0.0.0.0:${PORT}`));
 });
