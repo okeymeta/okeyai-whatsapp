@@ -5,56 +5,26 @@ import whatsappweb from 'whatsapp-web.js';
 import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
-import http from 'http'; // Add this line
-import mongoose from 'mongoose'; // Add this line
-import { MongoStore } from 'wwebjs-mongo'; // Add this line
-import { EventEmitter } from 'events'; // Add this line
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
 
 const { Client, LocalAuth, MessageMedia } = whatsappweb;
 
+// Add near the top of the file, after imports
+const PORT = process.env.PORT || 3000;
+
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
-const MESSAGE_QUEUE_INTERVAL = 1000; // Reduced from 2000 to 1000ms
-const TYPING_DURATION = { MIN: 500, MAX: 1500 }; // Reduced from 2000-4000 to 500-1500ms
+const MESSAGE_QUEUE_INTERVAL = 2000; // Time between messages (2 seconds)
+const TYPING_DURATION = { MIN: 2000, MAX: 4000 }; // Random typing duration between 2-4 seconds
 const MAX_CONCURRENT_CHATS = 15; // Maximum number of simultaneous chats
 const DAILY_MESSAGE_LIMIT = 1000; // Maximum messages per day
 const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
 const BOT_PREFIX = 'okeyai';
 const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
-
-// Add new constants
-const KEEPALIVE_INTERVAL = 1000; // More frequent keep-alive (1 second)
-const MEMORY_CHECK_INTERVAL = 300000; // 5 minutes
-const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB limit
-const PORT = process.env.PORT || 10000; // Match Render's detected port
-const PING_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`; // Add this line
-
-// Add these new constants after existing constants
-const PING_INTERVAL = 4 * 60 * 1000; // 4 minutes
-const AUTO_RESTART_INTERVAL = 24 * 60 * 60 * 1000; // Extend to 24 hours
-
-// Add new constants after other constants
-const WHATSAPP_REFRESH_INTERVAL = 30 * 60 * 1000; // 30 minutes
-const PRESENCE_REFRESH_INTERVAL = 15000; // 15 seconds
-const CONNECTION_RECOVERY_ATTEMPTS = 3;
-
-// Update constants
-const BROWSER_CHECK_INTERVAL = 3000; // Check browser every 3 seconds
-const CONNECTION_CHECK_INTERVAL = 5000; // Reduce to 5 seconds
-const MAX_RESPONSE_TIME = 15000; // Maximum response time threshold
-const RESTART_THRESHOLD = 60000; // Increase to 60 seconds
-
-// Update these constants at the top
-const RECONNECT_DELAY = 1000; // More aggressive reconnect
-const API_RETRY_ATTEMPTS = 3;  // Add this constant
-const MAX_LISTENERS = 25; // Increase max listeners limit
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -108,9 +78,8 @@ const splitMessage = (text) => {
 
 // Add new utility function for image generation
 const generateImage = async (prompt) => {
-    const timestamp = Date.now();
     const encodedPrompt = encodeURIComponent(prompt);
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=flux-pro&nologo=true&enhance=true&private=true&seed=${timestamp}`;
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=flux-pro&nologo=true&enhance=true&private=true`;
     
     // Pre-fetch image to ensure it's ready
     await axios.head(imageUrl);
@@ -272,7 +241,7 @@ class MessageQueue {
         while (userQueue.length > 0) {
             if (!this.canProcessMessage()) {
                 // Wait and check again if limits are exceeded
-                await new Promise(resolve => setTimeout(resolve, 2000)); // Reduced from 5000 to 2000ms
+                await new Promise(resolve => setTimeout(resolve, 5000));
                 continue;
             }
 
@@ -288,7 +257,7 @@ class MessageQueue {
                 
                 // Smarter typing duration based on message length
                 const typingDuration = Math.min(
-                    Math.max(message.body.length * 25, TYPING_DURATION.MIN), // Reduced multiplier from 50 to 25
+                    Math.max(message.body.length * 50, TYPING_DURATION.MIN),
                     TYPING_DURATION.MAX
                 );
                 await new Promise(resolve => setTimeout(resolve, typingDuration));
@@ -300,12 +269,12 @@ class MessageQueue {
                     for (const segment of segments) {
                         await chat.sendStateTyping();
                         await new Promise(resolve => 
-                            setTimeout(resolve, Math.min(segment.length * 25, 1500)) // Reduced from 3000 to 1500ms
+                            setTimeout(resolve, Math.min(segment.length * 50, 3000))
                         );
                         await client.sendMessage(message.from, segment);
                         // Add delay between segments
                         if (segments.length > 1) {
-                            await new Promise(resolve => setTimeout(resolve, 500)); // Reduced from 1000 to 500ms
+                            await new Promise(resolve => setTimeout(resolve, 1000));
                         }
                     }
                 }
@@ -339,74 +308,22 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
-// Add MongoDB connection constants
-const MONGODB_URI = process.env.MONGODB_URI || 'your_mongodb_atlas_uri_here';
-
-// Add MongoDB connection and store setup
-let store;
-mongoose.connect(MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-}).then(() => {
-    console.log(chalk.green('Connected to MongoDB Atlas'));
-    store = new MongoStore({ mongoose: mongoose });
-});
-
-// Enhance client configuration
+// Instantiate new WhatsApp client with persistent session
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'whatsapp-bot',
-        dataPath: SESSION_DIR,
-        store: store
+        dataPath: SESSION_DIR
     }),
     puppeteer: {
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--disable-gpu',
-            '--disable-extensions',
-            '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-sync',
-            '--no-zygote',
-            '--single-process',
-            '--aggressive-cache-discard', // Add this line
-            '--disable-cache', // Add this line
-            '--disable-application-cache', // Add this line
-            '--disable-offline-load-stale-cache', // Add this line
-            '--disk-cache-size=0', // Add this line
-            '--disable-web-security',
-            '--ignore-certificate-errors',
-            '--ignore-certificate-errors-spki-list',
-            '--ignore-ssl-errors',
-            '--deterministic-fetch',
-            '--disable-features=IsolateOrigins,site-per-process',
-            '--disable-site-isolation-trials'
-        ],
-        headless: 'new', // Use new headless mode
-        timeout: 0,
-        defaultViewport: null,
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false,
-        executablePath: IS_RENDER ? '/usr/bin/google-chrome-stable' : undefined,
-        userDataDir: IS_RENDER ? '/tmp/puppeteer_data' : undefined
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true
     },
-    restartOnAuthFail: true,
-    qrMaxRetries: 5,
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 0,
-    webVersionCache: {
-        type: 'local',
-        path: './.wwebjs_cache'
-    }
+    restartOnAuthFail: true
 });
 
 // Connection status tracking
 let isConnected = false;
+let reconnectAttempts = 0;
 
 // Connection state management
 const handleConnectionState = (state) => {
@@ -416,339 +333,21 @@ const handleConnectionState = (state) => {
 
 // Implement reconnection logic
 const reconnect = async () => {
-    let attempts = 0;
-    
-    while (attempts < CONNECTION_RECOVERY_ATTEMPTS) {
+    if (reconnectAttempts < MAX_RETRIES) {
+        reconnectAttempts++;
+        console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
+        
         try {
-            attempts++;
-            
-            // Try to refresh the page first
-            if (client.pupPage) {
-                await refreshWhatsAppPage();
-                if (await safePresenceUpdate()) {
-                    console.log(chalk.green('Connection recovered successfully'));
-                    return;
-                }
-            }
-
-            // If refresh fails, try full reconnect
             await client.initialize();
-            return;
         } catch (error) {
-            console.log(chalk.yellow(`Reconnection attempt ${attempts} failed`));
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            console.error(chalk.red('Reconnection failed:'), error);
+            setTimeout(reconnect, RETRY_DELAY);
         }
-    }
-    
-    // Keep the connection alive even if reconnect fails
-    isConnected = true;
-};
-
-// Add keepalive and memory management functions
-const setupKeepAlive = () => {
-    // Regular presence updates
-    setInterval(async () => {
-        if (isConnected) {
-            await safePresenceUpdate().catch(() => {});
-        }
-    }, PRESENCE_REFRESH_INTERVAL);
-
-    // Periodic WhatsApp refresh
-    setInterval(async () => {
-        if (isConnected) {
-            await refreshWhatsAppPage();
-        }
-    }, WHATSAPP_REFRESH_INTERVAL);
-};
-
-const setupMemoryManagement = () => {
-    setInterval(() => {
-        const memoryUsage = process.memoryUsage().heapUsed;
-        if (memoryUsage > MAX_MEMORY_USAGE) {
-            console.log(chalk.yellow('High memory usage detected, running garbage collection...'));
-            try {
-                global.gc();
-            } catch (e) {
-                console.log(chalk.yellow('Manual garbage collection not available'));
-            }
-        }
-    }, MEMORY_CHECK_INTERVAL);
-};
-
-// Add this function after setupMemoryManagement
-const setupHealthCheck = () => {
-    setInterval(() => {
-        try {
-            axios.get(`http://localhost:${PORT}`)
-                .then(() => console.log(chalk.blue('Health check passed')))
-                .catch(() => {});
-        } catch (error) {
-            // Ignore errors
-        }
-    }, HEALTH_CHECK_INTERVAL);
-
-    // Periodic ping to keep connection alive
-    setInterval(() => {
-        if (isConnected && client.pupPage) {
-            client.sendPresenceAvailable()
-                .catch(err => console.error(chalk.yellow('Presence update failed:', err)));
-        }
-    }, PING_INTERVAL);
-
-    // Auto-restart to prevent memory leaks and keep fresh
-    setInterval(() => {
-        console.log(chalk.yellow('Performing scheduled restart...'));
-        process.exit(0); // Process manager will restart
-    }, AUTO_RESTART_INTERVAL);
-};
-
-// Add this function after other utility functions
-const pingExternalUrl = async () => {
-    try {
-        const url = `http://localhost:${PORT}`;
-        const response = await axios.get(url, {
-            timeout: 5000,
-            headers: {
-                'Connection': 'keep-alive'
-            }
-        });
-        return response.status === 200;
-    } catch (error) {
-        return false;
+    } else {
+        console.error(chalk.red('Max reconnection attempts reached. Please restart the application.'));
+        process.exit(1);
     }
 };
-
-// Add new keepalive function
-const maintainConnection = () => {
-    let lastSuccessfulPing = Date.now();
-    
-    // Aggressive connection maintenance
-    setInterval(async () => {
-        if (isConnected) {
-            try {
-                await Promise.all([
-                    client.sendPresenceAvailable(),
-                    client.pupPage?.evaluate(() => {
-                        document.title = `Active ${Date.now()}`;
-                        window.dispatchEvent(new Event('focus'));
-                    }),
-                    axios.get(`http://localhost:${PORT}/ping`)
-                ]);
-                
-                lastSuccessfulPing = Date.now();
-            } catch (error) {
-                const timeSinceLastPing = Date.now() - lastSuccessfulPing;
-                if (timeSinceLastPing > 30000) { // 30 seconds without successful ping
-                    console.log(chalk.yellow('Connection appears stale, forcing refresh...'));
-                    await reconnect();
-                }
-            }
-        }
-    }, KEEPALIVE_INTERVAL);
-
-    // Additional heartbeat
-    setInterval(() => {
-        if (isConnected) {
-            http.get(`http://0.0.0.0:${PORT}`).end();
-            console.log('Heartbeat:', new Date().toISOString());
-        }
-    }, 1000); // Every second
-};
-
-// Add new function for browser monitoring
-const setupBrowserMonitoring = () => {
-    let browserRestartCount = 0;
-    
-    setInterval(async () => {
-        if (isConnected) {
-            try {
-                if (!client.pupPage || !client.pupBrowser || !await client.pupPage.evaluate(() => true).catch(() => false)) {
-                    console.log(chalk.yellow('Browser health check failed, refreshing connection...'));
-                    browserRestartCount++;
-                    
-                    if (browserRestartCount > 3) {
-                        process.exit(1); // Force complete restart if too many browser restarts
-                    }
-                    
-                    await reconnect();
-                } else {
-                    browserRestartCount = 0; // Reset counter on successful check
-                }
-            } catch (error) {
-                console.log(chalk.yellow('Browser check error:', error.message));
-            }
-        }
-    }, BROWSER_CHECK_INTERVAL);
-};
-
-// Add this new connection monitoring function
-const monitorConnection = () => {
-    let lastActivity = Date.now();
-    
-    setInterval(async () => {
-        const inactiveTime = Date.now() - lastActivity;
-        
-        if (isConnected && client.pupPage) {
-            try {
-                // Verify connection is truly alive
-                const isAlive = await client.pupPage.evaluate(() => navigator.onLine);
-                if (isAlive) {
-                    lastActivity = Date.now();
-                } else {
-                    throw new Error('Browser reports offline');
-                }
-            } catch (error) {
-                console.log(chalk.yellow('Connection check failed:', error.message));
-                if (inactiveTime > RESTART_THRESHOLD) {
-                    console.log(chalk.red('Connection dead, forcing restart...'));
-                    await reconnect();
-                }
-            }
-        }
-    }, CONNECTION_CHECK_INTERVAL);
-
-    // Add active keep-alive pings
-    setInterval(async () => {
-        if (isConnected && client.pupPage) {
-            try {
-                await client.sendPresenceAvailable();
-                await client.pupPage.evaluate(() => {
-                    window.focus();
-                    document.dispatchEvent(new Event('mousemove'));
-                });
-                lastActivity = Date.now();
-            } catch (error) {
-                console.log(chalk.yellow('Keep-alive failed:', error.message));
-            }
-        }
-    }, KEEPALIVE_INTERVAL);
-};
-
-// Add new persistent connection function
-const setupPersistentConnection = () => {
-    let keepAliveInterval;
-    
-    const startKeepAlive = () => {
-        if (keepAliveInterval) clearInterval(keepAliveInterval);
-        
-        keepAliveInterval = setInterval(async () => {
-            if (isConnected && client.pupPage) {
-                try {
-                    await Promise.all([
-                        client.sendPresenceAvailable(),
-                        client.pupPage.evaluate(() => {
-                            window.focus();
-                            document.title = `Active ${Date.now()}`;
-                            window.dispatchEvent(new Event('focus'));
-                            document.dispatchEvent(new Event('mousemove'));
-                        }),
-                        pingExternalUrl()
-                    ]);
-                } catch (error) {
-                    // Ignore errors but keep running
-                }
-            }
-        }, 1000); // Run every second
-    };
-
-    startKeepAlive();
-    
-    // Restart keep-alive if it stops
-    setInterval(() => {
-        if (!keepAliveInterval) startKeepAlive();
-    }, 5000);
-};
-
-// Add this new presence update function
-const safePresenceUpdate = async () => {
-    if (!client.pupPage) return false;
-    
-    try {
-        // First try the Store method
-        const storePresence = await client.pupPage.evaluate(() => {
-            if (window.Store && window.Store.PresenceUtils) {
-                window.Store.PresenceUtils.sendPresenceAvailable();
-                return true;
-            }
-            return false;
-        });
-
-        if (storePresence) return true;
-
-        // Fallback to client method
-        await client.sendPresenceAvailable();
-        return true;
-    } catch (error) {
-        // If presence fails, try to refresh WhatsApp
-        await refreshWhatsAppPage();
-        return false;
-    }
-};
-
-// Add this function near the top
-const setupEventEmitterDefaults = () => {
-    // Increase max listeners globally
-    EventEmitter.defaultMaxListeners = MAX_LISTENERS;
-    // Increase for process specifically
-    process.setMaxListeners(MAX_LISTENERS);
-};
-
-// Add new WhatsApp page refresh function
-const refreshWhatsAppPage = async () => {
-    if (!client.pupPage) return;
-    
-    try {
-        // Store session data
-        const sessionData = await client.pupPage.evaluate(() => {
-            return localStorage.getItem('WAWebSessionData');
-        });
-
-        // Refresh the page
-        await client.pupPage.reload({ waitUntil: 'networkidle0', timeout: 60000 });
-
-        // Restore session after reload
-        if (sessionData) {
-            await client.pupPage.evaluate((data) => {
-                localStorage.setItem('WAWebSessionData', data);
-            }, sessionData);
-        }
-
-        // Ensure WhatsApp is ready
-        await client.pupPage.waitForFunction(() => {
-            return window.Store && window.Store.PresenceUtils;
-        }, { timeout: 30000 });
-
-        console.log(chalk.green('WhatsApp Web refreshed successfully'));
-        isConnected = true;
-    } catch (error) {
-        console.log(chalk.yellow('WhatsApp refresh failed, attempting recovery...'));
-        await reconnect();
-    }
-};
-
-// Update the server creation
-const server = http.createServer((req, res) => {
-    // Add health check endpoint
-    if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            status: 'healthy',
-            uptime: process.uptime(),
-            memory: process.memoryUsage(),
-            isConnected,
-            timestamp: new Date().toISOString()
-        }));
-        return;
-    }
-    
-    // Regular response
-    res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=120'
-    });
-    res.end(JSON.stringify({ status: 'ok' }));
-});
 
 // QR code event handler
 client.on('qr', (qr) => {
@@ -760,6 +359,7 @@ client.on('qr', (qr) => {
 // Authentication event handlers
 client.on('authenticated', () => {
     console.log(chalk.green('WhatsApp authentication successful!\n'));
+    reconnectAttempts = 0;
     handleConnectionState('AUTHENTICATED');
 });
 
@@ -786,32 +386,6 @@ client.on('disconnected', async (reason) => {
     handleConnectionState('DISCONNECTED');
     await reconnect();
 });
-
-// Add this new recovery function
-const handleConnectionError = async (error) => {
-    console.log(chalk.yellow('Connection error detected:', error.message));
-    
-    if (error.code === 'ECONNRESET' || error.syscall === 'read') {
-        console.log(chalk.blue('Attempting to recover from connection reset...'));
-        try {
-            // Keep the client alive but attempt to refresh the connection
-            await client.pupPage?.evaluate(() => {
-                window.location.reload();
-            }).catch(() => {});
-            
-            // Force reconnection without full restart
-            await client.sendPresenceAvailable().catch(() => {});
-            
-            // Mark as connected to keep bot responding
-            isConnected = true;
-            handleConnectionState('RECOVERED');
-        } catch (recoveryError) {
-            console.log(chalk.yellow('Recovery attempt failed, continuing anyway'));
-            // Keep running even if recovery fails
-            isConnected = true;
-        }
-    }
-};
 
 // Message handler with retry mechanism
 client.on('message', async (message) => {
@@ -884,20 +458,13 @@ client.on('message', async (message) => {
 
         // Rest of your existing message handling code
         if (shouldProcess) {
-            // Wrap in error handler to prevent crashes
-            try {
-                await processMessageWithQueue(chat, message, processedMessage);
-            } catch (error) {
-                handleConnectionError(error);
-                // Still try to process the message
-                await processMessageWithQueue(chat, message, processedMessage);
-            }
+            await processMessageWithQueue(chat, message, processedMessage);
         }
 
     } catch (error) {
         console.error(chalk.red('Message handling error:'), error);
         console.error(error.stack); // Add stack trace for better debugging
-        handleConnectionError(error);
+        handleConnectionState('ERROR');
     }
 });
 
@@ -905,183 +472,88 @@ client.on('message', async (message) => {
 async function processMessageWithQueue(chat, message, processedContent) {
     await chat.sendSeen();
     
-    return messageQueue.addToQueue(chat, {
+    await messageQueue.addToQueue(chat, {
         ...message,
         body: processedContent
     }, async () => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), MAX_RESPONSE_TIME);
-
-        const makeApiCall = async (attempt = 1) => {
-            try {
-                const response = await axios.get(
-                    `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
-                    {
-                        params: {
-                            input: processedContent,
-                            imgUrl: '',
-                            APiKey: `okeymeta-${message.from}`
-                        },
-                        timeout: MAX_RESPONSE_TIME,
-                        headers: {
-                            'Keep-Alive': 'timeout=60, max=1000',
-                            'Connection': 'keep-alive',
-                            'Cache-Control': 'no-cache',
-                            'Pragma': 'no-cache'
-                        },
-                        responseType: 'json',
-                        // Add retry configuration
-                        validateStatus: status => status < 500,
-                        maxRedirects: 5,
-                        maxContentLength: 50 * 1024 * 1024 // 50MB
-                    }
-                );
-                return response.data?.response?.trim();
-            } catch (error) {
-                if (attempt < API_RETRY_ATTEMPTS) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    return makeApiCall(attempt + 1);
-                }
-                throw error;
-            }
-        };
-
         try {
-            // Start typing indicator immediately
-            chat.sendStateTyping().catch(() => {});
+            const response = await axios.get(
+                `https://api-okeymeta.vercel.app/api/ssailm/model/okeyai3.0-vanguard/okeyai`,
+                {
+                    params: {
+                        input: processedContent,
+                        imgUrl: '',
+                        APiKey: `okeymeta-${message.from}`
+                    },
+                    timeout: 90000
+                }
+            );
 
-            // Make API call with optimized settings
-            const response = await makeApiCall();
-
-            clearTimeout(timeoutId);
-            return response;
+            if (response.data?.response) {
+                return response.data.response.trim();
+            }
+            throw new Error('Invalid API response');
         } catch (error) {
-            clearTimeout(timeoutId);
             console.error(chalk.red('API Error:'), error.message);
-            throw error; // Let the queue handler deal with retries
+            return "I'm having trouble processing your message right now. Please try again in a moment.";
         }
     });
 }
 
 // Initialize client with connection state handling
 console.log('Starting WhatsApp client...\n');
-
-// Start the server first
-server.listen(PORT, '0.0.0.0', async () => {
-    console.log(chalk.blue(`Server started on port ${PORT}`));
-    
-    try {
-        setupEventEmitterDefaults(); // Add this line
-        
-        // Initialize WhatsApp client after server is running
-        await client.initialize();
-        handleConnectionState('INITIALIZING');
-        setupKeepAlive();
-        setupMemoryManagement();
-        setupHealthCheck();
-        maintainConnection(); // Add the new aggressive keep-alive
-        setupBrowserMonitoring(); // Add browser monitoring
-        monitorConnection(); // Add the new monitoring
-        setupPersistentConnection(); // Add new persistent connection
-        
-        // Prevent any automatic shutdowns
-        process.on('SIGTERM', () => {
-            console.log('Received SIGTERM - Ignoring to stay alive');
-        });
-        
-        process.on('SIGINT', () => {
-            console.log('Received SIGINT - Ignoring to stay alive');
-        });
-        
-    } catch (error) {
+client.initialize()
+    .then(() => handleConnectionState('INITIALIZING'))
+    .catch(async (error) => {
         console.error(chalk.red('Initialization failed:'), error);
         handleConnectionState('INITIALIZATION_FAILED');
         await reconnect();
-    }
-});
+    });
 
-// Graceful shutdown
-const shutdown = async (forceRestart = false) => {
-    // Always prevent shutdown in production
-    if (process.env.NODE_ENV === 'production') {
-        console.log(chalk.blue('Shutdown prevented in production'));
-        return;
-    }
-    
-    // Only proceed with shutdown if explicitly forced
-    if (!forceRestart) {
-        console.log(chalk.blue('Shutdown prevented - bot must stay alive'));
-        return;
-    }
-
-    // Prevent multiple shutdown attempts
-    if (global.isShuttingDown) return;
-    global.isShuttingDown = true;
-
-    console.log(chalk.yellow('\nShutdown requested...'));
-    
-    // Only actually shutdown if it's a real termination request
-    if (!forceRestart && process.env.NODE_ENV === 'production') {
-        console.log(chalk.blue('Production environment detected, keeping alive...'));
-        global.isShuttingDown = false;
-        return;
-    }
-
+// Modify the shutdown handler - remove PM2-specific code
+const shutdown = async (signal) => {
+    console.log(chalk.yellow(`\nReceived ${signal}. Shutting down...`));
     try {
         handleConnectionState('SHUTTING_DOWN');
-        
-        // Clean up browser
-        if (client.pupPage) {
-            await client.pupPage.close().catch(() => {});
-        }
-        if (client.pupBrowser) {
-            await client.pupBrowser.close().catch(() => {});
-        }
-        
         await client.destroy();
-        
-        // Close server properly with a promise
-        await new Promise((resolve) => {
-            if (server.listening) {
-                server.close(() => resolve());
-            } else {
-                resolve();
-            }
-        });
-        
-        console.log(chalk.green('Successfully cleaned up.'));
+        console.log(chalk.green('Successfully logged out and cleaned up.'));
     } catch (error) {
         console.error(chalk.red('Error during shutdown:'), error);
         handleConnectionState('SHUTDOWN_ERROR');
-    } finally {
-        global.isShuttingDown = false;
     }
-    
-    if (forceRestart) {
-        process.exit(1); // Force restart
-    }
+    process.exit(0);
 };
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+// Update signal handlers
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-// Add these process error handlers at the end of the file
-process.on('uncaughtException', async (err) => {
-    console.error(chalk.red('Uncaught Exception:'), err);
-    await handleConnectionError(err);
-    // Don't exit, try to keep running
+// Add handlers for uncaught exceptions and unhandled rejections
+process.on('uncaughtException', (error) => {
+    console.error(chalk.red('Uncaught Exception:'), error);
+    // Attempt to reconnect client if possible
+    if (!isConnected) {
+        reconnect();
+    }
 });
 
-process.on('unhandledRejection', async (reason, promise) => {
+process.on('unhandledRejection', (reason, promise) => {
     console.error(chalk.red('Unhandled Rejection at:'), promise, 'reason:', reason);
-    await handleConnectionError(reason);
-    // Don't exit, try to keep running
+    // Attempt to reconnect client if possible
+    if (!isConnected) {
+        reconnect();
+    }
 });
 
-// Remove the old production heartbeat at the end of the file and replace with this:
-if (process.env.NODE_ENV === 'production') {
-    process.stdin.resume(); // Keep process running
-    process.on('SIGTERM', () => {
-        console.log('Received SIGTERM, keeping alive');
-    });
-}
+// Add at the bottom of the file
+// Basic HTTP server to keep the service alive
+import http from 'http';
+
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('WhatsApp Bot Server Running\n');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(chalk.green(`Server running on http://0.0.0.0:${PORT}`));
+});
