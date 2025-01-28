@@ -12,7 +12,7 @@ import { MongoStore } from 'wwebjs-mongo'; // Add this
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
 
-const { Client, LocalAuth, MessageMedia } = whatsappweb;
+const { Client, LocalAuth, MessageMedia, RemoteAuth } = whatsappweb;
 
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
