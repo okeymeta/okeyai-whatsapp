@@ -30,6 +30,12 @@ const KEEP_ALIVE_INTERVAL = 280000; // 4.6 minutes
 const MEMORY_CHECK_INTERVAL = 600000; // 10 minutes
 const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB
 
+// Add new constants
+const HEARTBEAT_INTERVAL = 3000; // 3 seconds
+const PRESENCE_INTERVAL = 5000; // 5 seconds
+const WATCHDOG_INTERVAL = 10000; // 10 seconds
+const CONNECTION_CHECK_INTERVAL = 15000; // 15 seconds
+
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
 if (!fs.existsSync(SESSION_DIR)) {
@@ -210,6 +216,7 @@ class MessageQueue {
         this.lastReset = Date.now();
         this.userLastMessage = new Map(); // Track last message time per user
         this.userMessageCount = new Map(); // Track message count per user
+        this.typing = new Map(); // Track typing state per user
         
         // Reset counters periodically
         setInterval(() => this.resetHourlyCount(), 3600000); // Reset hourly
@@ -310,24 +317,17 @@ class MessageQueue {
                 this.hourlyMessages++;
                 
                 // Show typing indicator with smart duration
-                await chat.sendStateTyping();
-                
-                // Smarter typing duration based on message length
-                const typingDuration = Math.min(
+                await this.showTyping(chat, Math.min(
                     Math.max(message.body.length * 50, TYPING_DURATION.MIN),
                     TYPING_DURATION.MAX
-                );
-                await new Promise(resolve => setTimeout(resolve, typingDuration));
+                ));
                 
                 // Process message with response splitting
                 const result = await handler();
                 if (result) {
                     const segments = splitMessage(result);
                     for (const segment of segments) {
-                        await chat.sendStateTyping();
-                        await new Promise(resolve => 
-                            setTimeout(resolve, Math.min(segment.length * 50, 3000))
-                        );
+                        await this.showTyping(chat, Math.min(segment.length * 50, 3000));
                         await client.sendMessage(message.from, segment);
                         // Add delay between segments
                         if (segments.length > 1) {
@@ -358,6 +358,18 @@ class MessageQueue {
         if (userQueue.length === 0) {
             this.queue.delete(userId);
             this.messageCount.delete(userId);
+        }
+    }
+
+    async showTyping(chat, duration) {
+        if (this.typing.has(chat.id._serialized)) return;
+        
+        this.typing.set(chat.id._serialized, true);
+        try {
+            await chat.sendStateTyping();
+            await new Promise(resolve => setTimeout(resolve, duration));
+        } finally {
+            this.typing.delete(chat.id._serialized);
         }
     }
 }
@@ -402,17 +414,23 @@ const client = new Client({
             '--enable-features=NetworkService,NetworkServiceInProcess',
             '--force-color-profile=srgb',
             '--metrics-recording-only',
-            '--no-first-run'
+            '--no-first-run',
+            '--js-flags="--max-old-space-size=4096"',
+            '--optimize-for-size',
+            '--memory-pressure-off',
+            '--disable-dev-shm-usage'
         ],
         defaultViewport: null,
-        timeout: 0
+        timeout: 0,
+        browserWSEndpoint: null,
     },
     restartOnAuthFail: true,
     takeoverOnConflict: true,
     takeoverTimeoutMs: 0,
-    qrMaxRetries: 5,
+    qrMaxRetries: Infinity,
     connectTimeoutMs: 0,
-    authTimeoutMs: 0
+    authTimeoutMs: 0,
+    waitForLogin: true
 });
 
 // Connection status tracking
@@ -451,6 +469,10 @@ const reconnect = async () => {
         
         console.log(chalk.green('Reconnection successful'));
         reconnectAttempts = 0;
+
+        // Force presence update after reconnection
+        await client.sendPresenceAvailable();
+        await client.setStatus('Online and ready!');
     } catch (error) {
         console.error(chalk.red('Reconnection failed:'), error);
         reconnectAttempts++;
@@ -627,20 +649,60 @@ client.initialize()
         await reconnect();
     });
 
+// Add connection watchdog
+const connectionWatchdog = {
+    lastPing: Date.now(),
+    isHealthy: true,
+    check() {
+        const now = Date.now();
+        this.isHealthy = now - this.lastPing < 30000;
+        return this.isHealthy;
+    },
+    ping() {
+        this.lastPing = Date.now();
+    }
+};
+
 // Enhanced keep-alive mechanism
 const keepAlive = () => {
+    // Aggressive heartbeat
+    setInterval(async () => {
+        try {
+            if (!isConnected) await reconnect();
+            connectionWatchdog.ping();
+            await client.sendPresenceAvailable();
+        } catch (error) {
+            console.error(chalk.red('Heartbeat error, continuing...'));
+        }
+    }, HEARTBEAT_INTERVAL);
+
+    // Presence management
+    setInterval(async () => {
+        try {
+            await client.sendPresenceAvailable();
+            await client.setStatus('Online and ready!');
+        } catch (error) {
+            console.error(chalk.red('Presence update error'));
+        }
+    }, PRESENCE_INTERVAL);
+
+    // Connection monitoring
+    setInterval(() => {
+        if (!connectionWatchdog.check()) {
+            console.log(chalk.yellow('Connection watchdog triggered reconnection'));
+            reconnect();
+        }
+    }, WATCHDOG_INTERVAL);
+
+    // Health check
     setInterval(async () => {
         try {
             const response = await axios.get(`http://localhost:${process.env.PORT || 3000}`);
             if (response.status !== 200) throw new Error('Health check failed');
-            
-            if (!isConnected) {
-                await reconnect();
-            }
         } catch (error) {
-            console.error(chalk.red('Keep-alive error:'), error);
+            console.error(chalk.red('Health check error'));
         }
-    }, 30000);
+    }, CONNECTION_CHECK_INTERVAL);
 };
 
 // Add memory management
@@ -657,10 +719,12 @@ const checkMemoryUsage = () => {
 // Add process error handlers to prevent crashes
 process.on('uncaughtException', (err) => {
     console.error(chalk.red('Uncaught Exception:'), err);
+    reconnect();
 });
 
 process.on('unhandledRejection', (err) => {
     console.error(chalk.red('Unhandled Rejection:'), err);
+    reconnect();
 });
 
 // Add crash handling
@@ -679,4 +743,14 @@ process.on('uncaughtException', async (err) => {
     } finally {
         process.exit(1);
     }
+});
+
+// Add connection state handlers
+client.on('change_state', state => {
+    console.log(chalk.blue(`State changed to: ${state}`));
+    connectionWatchdog.ping();
+});
+
+client.on('change_battery', batteryInfo => {
+    console.log(chalk.blue(`Battery: ${batteryInfo.battery}% - Charging: ${batteryInfo.plugged}`));
 });
