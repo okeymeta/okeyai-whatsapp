@@ -6,6 +6,7 @@ import fs from 'fs';
 import { createRequire } from 'module'; // Add this line
 import sharp from 'sharp'; // Add this line
 import mongoose from 'mongoose';
+import http from 'http'; // Add this line
 
 const require = createRequire(import.meta.url); // Add this line
 const Jimp = require('jimp'); // Direct require without destructuring
@@ -23,6 +24,11 @@ const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
 const BOT_PREFIX = 'okeyai';
 const IMAGE_COMMAND = 'imagine';
 const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
+
+// Add these configurations at the top
+const KEEP_ALIVE_INTERVAL = 280000; // 4.6 minutes
+const MEMORY_CHECK_INTERVAL = 600000; // 10 minutes
+const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB
 
 // Create sessions directory if it doesn't exist
 const SESSION_DIR = './.wwebjs_auth';
@@ -357,6 +363,13 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
+// Add port binding
+const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('WhatsApp bot is running');
+});
+server.listen(process.env.PORT || 3000, '0.0.0.0');
+
 // Instantiate new WhatsApp client with persistent session
 const client = new Client({
     authStrategy: new MongoDBAuth({
@@ -364,10 +377,46 @@ const client = new Client({
         dataPath: SESSION_DIR
     }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        headless: true
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-extensions',
+            '--disable-software-rasterizer',
+            '--disable-web-security',
+            '--aggressive-cache-discard',
+            '--disable-cache',
+            '--disable-application-cache',
+            '--disable-offline-load-stale-cache',
+            '--disk-cache-size=0',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-breakpad',
+            '--disable-component-extensions-with-background-pages',
+            '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+            '--disable-ipc-flooding-protection',
+            '--disable-renderer-backgrounding',
+            '--enable-features=NetworkService,NetworkServiceInProcess',
+            '--force-color-profile=srgb',
+            '--metrics-recording-only',
+            '--no-first-run',
+            '--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost"',
+            '--ignore-certificate-errors',
+            '--ignore-certificate-errors-spki-list',
+            '--ignore-ssl-errors'
+        ],
+        defaultViewport: null,
+        timeout: 0,
+        browserWSEndpoint: null,
+        userDataDir: './user_data'
     },
-    restartOnAuthFail: true
+    restartOnAuthFail: true,
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 0,
+    qrMaxRetries: 5,
+    connectTimeoutMs: 0,
+    authTimeoutMs: 0
 });
 
 // Connection status tracking
@@ -380,23 +429,42 @@ const handleConnectionState = (state) => {
     isConnected = state === 'CONNECTED';
 };
 
-// Implement reconnection logic
+// Enhanced reconnection logic
 const reconnect = async () => {
-    if (reconnectAttempts < MAX_RETRIES) {
-        reconnectAttempts++;
-        console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
+    try {
+        console.log(chalk.yellow('Attempting reconnection...'));
         
-        try {
-            await client.destroy();
-            await client.initialize();
-        } catch (error) {
-            console.error(chalk.red('Reconnection failed:'), error);
-            setTimeout(reconnect, RETRY_DELAY);
+        // Proper cleanup
+        if (client.pupPage) {
+            await client.pupPage.close().catch(() => {});
         }
-    } else {
-        console.error(chalk.red('Max reconnection attempts reached. Resetting attempts...'));
-        reconnectAttempts = 0; // Reset attempts instead of exiting
-        setTimeout(reconnect, RETRY_DELAY * 2); // Try again after double delay
+        if (client.pupBrowser) {
+            await client.pupBrowser.close().catch(() => {});
+        }
+        
+        // Wait before reconnecting
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        // Clear any existing sessions
+        try {
+            fs.rmSync('./user_data', { recursive: true, force: true });
+        } catch (err) {}
+        
+        // Initialize with fresh session
+        await client.initialize();
+        
+        console.log(chalk.green('Reconnection successful'));
+        reconnectAttempts = 0;
+    } catch (error) {
+        console.error(chalk.red('Reconnection failed:'), error);
+        reconnectAttempts++;
+        
+        if (reconnectAttempts < MAX_RETRIES) {
+            setTimeout(reconnect, RETRY_DELAY * reconnectAttempts);
+        } else {
+            console.log(chalk.red('Max retries reached, restarting process...'));
+            process.exit(1); // Let process manager handle restart
+        }
     }
 };
 
@@ -429,6 +497,7 @@ client.on('ready', () => {
     // Store bot start time
     global.botStartTime = Date.now();
     keepAlive();
+    checkMemoryUsage();
 });
 
 // Disconnection handler
@@ -562,33 +631,56 @@ client.initialize()
         await reconnect();
     });
 
-// Add heartbeat mechanism to prevent Render shutdown
+// Enhanced keep-alive mechanism
 const keepAlive = () => {
     setInterval(async () => {
         try {
-            // Ping self URL to keep alive
-            await axios.get('https://okeyai-whatsapp.onrender.com/');
+            const response = await axios.get(`http://localhost:${process.env.PORT || 3000}`);
+            if (response.status !== 200) throw new Error('Health check failed');
             
-            // Ensure WhatsApp connection
             if (!isConnected) {
-                console.log(chalk.yellow('Reconnecting WhatsApp...'));
                 await reconnect();
             }
-            
-            // Force garbage collection to prevent memory leaks
-            if (global.gc) {
-                global.gc();
-            }
         } catch (error) {
-            console.error(chalk.red('Heartbeat error:'), error);
+            console.error(chalk.red('Keep-alive error:'), error);
         }
-    }, 30000); // Every 30 seconds
+    }, 30000);
 };
 
-// Add connection monitoring
-setInterval(() => {
-    if (!isConnected) {
-        console.log(chalk.yellow('Connection check - Reconnecting...'));
-        reconnect();
+// Add memory management
+const checkMemoryUsage = () => {
+    const used = process.memoryUsage();
+    if (used.heapUsed > MAX_MEMORY_USAGE) {
+        console.log(chalk.yellow('High memory usage detected, running garbage collection...'));
+        if (global.gc) {
+            global.gc();
+        }
     }
-}, 60000);
+};
+
+// Add process error handlers to prevent crashes
+process.on('uncaughtException', (err) => {
+    console.error(chalk.red('Uncaught Exception:'), err);
+});
+
+process.on('unhandledRejection', (err) => {
+    console.error(chalk.red('Unhandled Rejection:'), err);
+});
+
+// Add crash handling
+process.on('SIGTERM', async () => {
+    try {
+        await client.destroy();
+    } finally {
+        process.exit(0);
+    }
+});
+
+process.on('uncaughtException', async (err) => {
+    console.error(chalk.red('Uncaught Exception:'), err);
+    try {
+        await client.destroy();
+    } finally {
+        process.exit(1);
+    }
+});
