@@ -311,261 +311,206 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
-// Add MongoDB connection and store setup
-let store;
-
-mongoose.connect(MONGODB_URI).then(() => {
-    console.log(chalk.green('Connected to MongoDB Atlas'));
-    store = new MongoStore({ mongoose: mongoose });
-});
-
-// Update client initialization with remote auth
-const client = new Client({
-    authStrategy: new RemoteAuth({
-        clientId: 'whatsapp-bot',
-        store: store,
-        backupSyncIntervalMs: 300000 // Backup every 5 minutes
-    }),
-    puppeteer: {
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ],
-        headless: true,
-        timeout: 0
-    },
-    restartOnAuthFail: true,
-    refreshQR: 30000,
-    qrMaxRetries: 5,
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 10000
-});
-
-// Add session refresh mechanism
-const SESSION_REFRESH_INTERVAL = 1800000; // 30 minutes
-setInterval(async () => {
-    if (isConnected) {
-        try {
-            await client.resetState();
-            console.log(chalk.blue('Session refreshed'));
-        } catch (error) {
-            console.error(chalk.red('Session refresh failed:'), error);
-        }
-    }
-}, SESSION_REFRESH_INTERVAL);
-
-// Add keep-alive ping
-const PING_INTERVAL = 45000; // 45 seconds
-let pingServer;
-
-const startPingServer = () => {
-    if (pingServer) clearInterval(pingServer);
-    pingServer = setInterval(async () => {
-        try {
-            const response = await axios.get(`http://0.0.0.0:${PORT}/ping`);
-            console.log(chalk.gray('Ping successful:', response.status));
-        } catch (error) {
-            console.error(chalk.red('Ping failed:'), error.message);
-        }
-    }, PING_INTERVAL);
-};
-
-// Enhanced server setup with health check endpoint
-const server = http.createServer((req, res) => {
-    if (req.url === '/ping') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            status: 'ok',
-            timestamp: new Date().toISOString(),
-            uptime: process.uptime(),
-            connected: isConnected,
-            queueSize: messageQueue.queue.size
-        }));
-    } else {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('WhatsApp Bot is running!');
-    }
-});
-
-// Enhanced connection monitoring
-const CONNECTION_CHECK_INTERVAL = 60000; // 1 minute
-setInterval(async () => {
-    if (!isConnected) {
-        console.log(chalk.yellow('Connection check: Disconnected, attempting reconnect...'));
-        try {
-            await reconnect();
-        } catch (error) {
-            console.error(chalk.red('Reconnection failed:'), error);
-        }
-    }
-}, CONNECTION_CHECK_INTERVAL);
-
-// Update server initialization
-server.listen(PORT, '0.0.0.0', async () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
-    startPingServer();
-    
+// Initialize MongoDB and WhatsApp client
+async function initialize() {
     try {
+        // Connect to MongoDB first
+        await mongoose.connect(MONGODB_URI, {
+            useNewUrlParser: true,
+            useUnifiedTopology: true,
+            serverSelectionTimeoutMS: 5000
+        });
+        console.log(chalk.green('Connected to MongoDB Atlas'));
+
+        // Initialize store
+        store = new MongoStore({ mongoose: mongoose });
+        await store.initialize();
+
+        // Initialize WhatsApp client
+        const client = new Client({
+            authStrategy: new RemoteAuth({
+                clientId: 'whatsapp-bot',
+                store: store,
+                backupSyncIntervalMs: 300000
+            }),
+            puppeteer: {
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--disable-gpu'
+                ],
+                headless: true,
+                timeout: 0
+            },
+            restartOnAuthFail: true,
+            refreshQR: 30000,
+            qrMaxRetries: 5,
+            takeoverOnConflict: true,
+            takeoverTimeoutMs: 10000
+        });
+
+        // Start server after client initialization
+        const server = http.createServer((req, res) => {
+            if (req.url === '/ping') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    status: 'ok',
+                    timestamp: new Date().toISOString(),
+                    uptime: process.uptime(),
+                    connected: isConnected,
+                    queueSize: messageQueue.queue.size
+                }));
+            } else {
+                res.writeHead(200, { 'Content-Type': 'text/plain' });
+                res.end('WhatsApp Bot is running!');
+            }
+        });
+
+        server.listen(PORT, '0.0.0.0', () => {
+            console.log(`Server running on http://0.0.0.0:${PORT}`);
+            startPingServer();
+        });
+
+        // Initialize client
         await client.initialize();
-        handleConnectionState('INITIALIZING');
+        return client;
     } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
-        handleConnectionState('INITIALIZATION_FAILED');
-        await reconnect();
+        throw error;
     }
-});
+}
 
-// Connection status tracking
-let isConnected = false;
-let reconnectAttempts = 0;
-
-// Connection state management
-const handleConnectionState = (state) => {
-    console.log(chalk.yellow(`Connection state: ${state}`));
-    isConnected = state === 'CONNECTED';
-};
-
-// Implement reconnection logic
-const reconnect = async () => {
-    if (reconnectAttempts < MAX_RETRIES) {
-        reconnectAttempts++;
-        console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
-        
-        try {
-            await client.initialize();
-        } catch (error) {
-            console.error(chalk.red('Reconnection failed:'), error);
-            setTimeout(reconnect, RETRY_DELAY);
-        }
-    } else {
-        console.error(chalk.red('Max reconnection attempts reached. Please restart the application.'));
-        process.exit(1);
-    }
-};
-
-// QR code event handler
-client.on('qr', (qr) => {
-    console.clear();
-    console.log('\n1. Open WhatsApp on your phone\n2. Tap Menu or Settings and select WhatsApp Web\n3. Point your phone to this screen to capture the code\n');
-    qrcode.generate(qr, { small: true });
-});
-
-// Authentication event handlers
-client.on('authenticated', () => {
-    console.log(chalk.green('WhatsApp authentication successful!\n'));
-    reconnectAttempts = 0;
-    handleConnectionState('AUTHENTICATED');
-});
-
-client.on('auth_failure', async (message) => {
-    console.error(chalk.red('WHATSAPP AUTHENTICATION FAILURE:'), message);
-    handleConnectionState('AUTH_FAILURE');
-    await reconnect();
-});
-
-// Ready event handler
-client.on('ready', () => {
-    isConnected = true;
-    handleConnectionState('CONNECTED');
-    console.log(chalk.green('OkeyAI is ready and connected!\n'));
-    console.log(chalk.greenBright('OkeyAI activated. Listening for messages...\n'));
-    // Store bot start time
-    global.botStartTime = Date.now();
-});
-
-// Disconnection handler
-client.on('disconnected', async (reason) => {
-    console.log(chalk.red('Client disconnected:'), reason);
-    isConnected = false;
-    handleConnectionState('DISCONNECTED');
-    await reconnect();
-});
-
-// Message handler with retry mechanism
-client.on('message', async (message) => {
-    if (!isConnected) return;
-
+// Start the application
+(async () => {
     try {
-        const chat = await message.getChat();
-        const trimmedMessage = message.body.trim();
+        const client = await initialize();
         
-        // Early return if empty message
-        if (!trimmedMessage) return;
+        // Set up event handlers
+        client.on('qr', (qr) => {
+            console.clear();
+            console.log('\n1. Open WhatsApp on your phone\n2. Tap Menu or Settings and select WhatsApp Web\n3. Point your phone to this screen to capture the code\n');
+            qrcode.generate(qr, { small: true });
+        });
 
-        const isGroupChat = chat.id._serialized.endsWith('@g.us');
-        let processedMessage = trimmedMessage;
-        let shouldProcess = false;
-        let isImageRequest = false;
+        client.on('authenticated', () => {
+            console.log(chalk.green('WhatsApp authentication successful!\n'));
+            reconnectAttempts = 0;
+            handleConnectionState('AUTHENTICATED');
+        });
 
-        // Check for image generation command
-        const lowerCaseMsg = trimmedMessage.toLowerCase();
-        if (lowerCaseMsg.startsWith(`${BOT_PREFIX} ${IMAGE_COMMAND}`) || 
-            (!isGroupChat && lowerCaseMsg.startsWith(IMAGE_COMMAND))) {
-            
-            isImageRequest = true;
-            const prompt = isGroupChat ? 
-                trimmedMessage.slice(`${BOT_PREFIX} ${IMAGE_COMMAND}`.length).trim() :
-                trimmedMessage.slice(IMAGE_COMMAND.length).trim();
+        client.on('auth_failure', async (message) => {
+            console.error(chalk.red('WHATSAPP AUTHENTICATION FAILURE:'), message);
+            handleConnectionState('AUTH_FAILURE');
+            await reconnect();
+        });
 
-            if (!prompt) {
-                await chat.sendMessage("Please provide a description of what you want to imagine.");
-                return;
-            }
+        client.on('ready', () => {
+            isConnected = true;
+            handleConnectionState('CONNECTED');
+            console.log(chalk.green('OkeyAI is ready and connected!\n'));
+            console.log(chalk.greenBright('OkeyAI activated. Listening for messages...\n'));
+            // Store bot start time
+            global.botStartTime = Date.now();
+        });
 
-            // Check if already generating for this chat
-            if (activeImageGenerations.has(chat.id._serialized)) {
-                await chat.sendMessage("I'm already generating an image for you. Please wait...");
-                return;
-            }
+        client.on('disconnected', async (reason) => {
+            console.log(chalk.red('Client disconnected:'), reason);
+            isConnected = false;
+            handleConnectionState('DISCONNECTED');
+            await reconnect();
+        });
+
+        client.on('message', async (message) => {
+            if (!isConnected) return;
 
             try {
-                activeImageGenerations.set(chat.id._serialized, true);
-                await chat.sendMessage("🎨 Generating your image...");
+                const chat = await message.getChat();
+                const trimmedMessage = message.body.trim();
+                
+                // Early return if empty message
+                if (!trimmedMessage) return;
 
-                // Generate image with timeout
-                const imagePromise = generateImage(prompt);
-                const timeoutPromise = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Image generation timed out')), IMAGE_TIMEOUT)
-                );
+                const isGroupChat = chat.id._serialized.endsWith('@g.us');
+                let processedMessage = trimmedMessage;
+                let shouldProcess = false;
+                let isImageRequest = false;
 
-                const imageUrl = await Promise.race([imagePromise, timeoutPromise]);
-                await sendWhatsAppImage(chat, "✨ Here's your generated image!", imageUrl);
+                // Check for image generation command
+                const lowerCaseMsg = trimmedMessage.toLowerCase();
+                if (lowerCaseMsg.startsWith(`${BOT_PREFIX} ${IMAGE_COMMAND}`) || 
+                    (!isGroupChat && lowerCaseMsg.startsWith(IMAGE_COMMAND))) {
+                    
+                    isImageRequest = true;
+                    const prompt = isGroupChat ? 
+                        trimmedMessage.slice(`${BOT_PREFIX} ${IMAGE_COMMAND}`.length).trim() :
+                        trimmedMessage.slice(IMAGE_COMMAND.length).trim();
+
+                    if (!prompt) {
+                        await chat.sendMessage("Please provide a description of what you want to imagine.");
+                        return;
+                    }
+
+                    // Check if already generating for this chat
+                    if (activeImageGenerations.has(chat.id._serialized)) {
+                        await chat.sendMessage("I'm already generating an image for you. Please wait...");
+                        return;
+                    }
+
+                    try {
+                        activeImageGenerations.set(chat.id._serialized, true);
+                        await chat.sendMessage("🎨 Generating your image...");
+
+                        // Generate image with timeout
+                        const imagePromise = generateImage(prompt);
+                        const timeoutPromise = new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('Image generation timed out')), IMAGE_TIMEOUT)
+                        );
+
+                        const imageUrl = await Promise.race([imagePromise, timeoutPromise]);
+                        await sendWhatsAppImage(chat, "✨ Here's your generated image!", imageUrl);
+
+                    } catch (error) {
+                        console.error(chalk.red('Image generation error:'), error);
+                        await chat.sendMessage("Sorry, I couldn't generate that image. Please try again.");
+                    } finally {
+                        activeImageGenerations.delete(chat.id._serialized);
+                    }
+                    return;
+                }
+
+                // Handle regular messages
+                if (isGroupChat) {
+                    if (trimmedMessage.toLowerCase().startsWith(BOT_PREFIX)) {
+                        processedMessage = trimmedMessage.slice(BOT_PREFIX.length).trim();
+                        shouldProcess = processedMessage.length > 0;
+                    }
+                } else {
+                    shouldProcess = true;
+                }
+
+                // Rest of your existing message handling code
+                if (shouldProcess) {
+                    await processMessageWithQueue(chat, message, processedMessage);
+                }
 
             } catch (error) {
-                console.error(chalk.red('Image generation error:'), error);
-                await chat.sendMessage("Sorry, I couldn't generate that image. Please try again.");
-            } finally {
-                activeImageGenerations.delete(chat.id._serialized);
+                console.error(chalk.red('Message handling error:'), error);
+                console.error(error.stack); // Add stack trace for better debugging
+                handleConnectionState('ERROR');
             }
-            return;
-        }
-
-        // Handle regular messages
-        if (isGroupChat) {
-            if (trimmedMessage.toLowerCase().startsWith(BOT_PREFIX)) {
-                processedMessage = trimmedMessage.slice(BOT_PREFIX.length).trim();
-                shouldProcess = processedMessage.length > 0;
-            }
-        } else {
-            shouldProcess = true;
-        }
-
-        // Rest of your existing message handling code
-        if (shouldProcess) {
-            await processMessageWithQueue(chat, message, processedMessage);
-        }
+        });
 
     } catch (error) {
-        console.error(chalk.red('Message handling error:'), error);
-        console.error(error.stack); // Add stack trace for better debugging
-        handleConnectionState('ERROR');
+        console.error(chalk.red('Fatal error:'), error);
+        // Wait 30 seconds before retrying
+        await new Promise(resolve => setTimeout(resolve, 30000));
+        process.exit(1); // Let the process manager restart us
     }
-});
+})();
 
 // Helper function to process messages through queue
 async function processMessageWithQueue(chat, message, processedContent) {
