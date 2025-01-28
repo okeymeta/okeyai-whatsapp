@@ -61,7 +61,8 @@ class MongoDBAuth extends LocalAuth {
     async beforeBrowserInitialize() {
         const sessionData = await Session.findOne({ sessionId: 'whatsapp-bot' });
         if (sessionData) {
-            const sessionDir = './.wwebjs_auth/session';
+            await super.beforeBrowserInitialize();
+            const sessionDir = `${this.dataPath}/session`;
             if (!fs.existsSync(sessionDir)) {
                 fs.mkdirSync(sessionDir, { recursive: true });
             }
@@ -73,7 +74,7 @@ class MongoDBAuth extends LocalAuth {
     }
 
     async afterBrowserInitialize() {
-        const sessionDir = './.wwebjs_auth/session';
+        const sessionDir = `${this.dataPath}/session`;
         if (fs.existsSync(`${sessionDir}/session.json`)) {
             const sessionData = JSON.parse(
                 fs.readFileSync(`${sessionDir}/session.json`, 'utf8')
@@ -84,6 +85,7 @@ class MongoDBAuth extends LocalAuth {
                 { upsert: true }
             );
         }
+        await super.afterBrowserInitialize();
     }
 }
 
@@ -400,16 +402,10 @@ const client = new Client({
             '--enable-features=NetworkService,NetworkServiceInProcess',
             '--force-color-profile=srgb',
             '--metrics-recording-only',
-            '--no-first-run',
-            '--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost"',
-            '--ignore-certificate-errors',
-            '--ignore-certificate-errors-spki-list',
-            '--ignore-ssl-errors'
+            '--no-first-run'
         ],
         defaultViewport: null,
-        timeout: 0,
-        browserWSEndpoint: null,
-        userDataDir: './user_data'
+        timeout: 0
     },
     restartOnAuthFail: true,
     takeoverOnConflict: true,
