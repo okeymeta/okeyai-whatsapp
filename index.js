@@ -311,7 +311,12 @@ class MessageQueue {
 // Instantiate message queue
 const messageQueue = new MessageQueue();
 
-// Initialize MongoDB and WhatsApp client
+// Declare server at the top level
+let server;
+let client;
+let store;
+
+// Initialize everything in sequence
 async function initialize() {
     try {
         // Connect to MongoDB first
@@ -326,8 +331,43 @@ async function initialize() {
         store = new MongoStore({ mongoose: mongoose });
         await store.initialize();
 
+        // Create HTTP server first
+        server = http.createServer((req, res) => {
+            if (req.url === '/ping') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    status: 'ok',
+                    timestamp: new Date().toISOString(),
+                    uptime: process.uptime(),
+                    connected: isConnected,
+                    queueSize: messageQueue.queue.size
+                }));
+            } else {
+                res.writeHead(200, { 'Content-Type': 'text/plain' });
+                res.end('WhatsApp Bot is running!');
+            }
+        });
+
+        // Add error handler for the server
+        server.on('error', (error) => {
+            console.error(chalk.red('Server error:'), error);
+            if (error.code === 'EADDRINUSE') {
+                console.error(chalk.red(`Port ${PORT} is already in use`));
+                process.exit(1);
+            }
+        });
+
+        // Start server
+        await new Promise((resolve) => {
+            server.listen(PORT, '0.0.0.0', () => {
+                console.log(`Server running on http://0.0.0.0:${PORT}`);
+                startPingServer();
+                resolve();
+            });
+        });
+
         // Initialize WhatsApp client
-        const client = new Client({
+        client = new Client({
             authStrategy: new RemoteAuth({
                 clientId: 'whatsapp-bot',
                 store: store,
@@ -353,31 +393,10 @@ async function initialize() {
             takeoverTimeoutMs: 10000
         });
 
-        // Start server after client initialization
-        const server = http.createServer((req, res) => {
-            if (req.url === '/ping') {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({
-                    status: 'ok',
-                    timestamp: new Date().toISOString(),
-                    uptime: process.uptime(),
-                    connected: isConnected,
-                    queueSize: messageQueue.queue.size
-                }));
-            } else {
-                res.writeHead(200, { 'Content-Type': 'text/plain' });
-                res.end('WhatsApp Bot is running!');
-            }
-        });
-
-        server.listen(PORT, '0.0.0.0', () => {
-            console.log(`Server running on http://0.0.0.0:${PORT}`);
-            startPingServer();
-        });
-
         // Initialize client
         await client.initialize();
         return client;
+
     } catch (error) {
         console.error(chalk.red('Initialization failed:'), error);
         throw error;
@@ -546,15 +565,6 @@ async function processMessageWithQueue(chat, message, processedContent) {
 
 // Initialize HTTP server first
 const PORT = process.env.PORT || 3000;
-
-// Add error handler for the server
-server.on('error', (error) => {
-    console.error(chalk.red('Server error:'), error);
-    if (error.code === 'EADDRINUSE') {
-        console.error(chalk.red(`Port ${PORT} is already in use`));
-        process.exit(1);
-    }
-});
 
 // Remove the shutdown function entirely and replace with persistent connection handlers
 process.on('SIGINT', () => {
