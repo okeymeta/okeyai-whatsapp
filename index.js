@@ -32,11 +32,14 @@ if (!fs.existsSync(SESSION_DIR)) {
     fs.mkdirSync(SESSION_DIR, { recursive: true });
 }
 
-// Add mongoose configuration before any database operations
+// Add mongoose configuration right after imports
 mongoose.set('strictQuery', true);
 
-// Update MongoDB URL with proper format
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://nwaozor:nwaozor@cluster0.rmvi7qm.mongodb.net/whatbot?retryWrites=true&w=majority&appName=Cluster0';
+// Remove the hardcoded MongoDB URI and use environment variable only
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) {
+    throw new Error('MONGODB_URI environment variable is not set');
+}
 
 // Add these utility functions before MessageQueue class
 const splitMessage = (text) => {
@@ -326,17 +329,25 @@ async function initialize() {
         await mongoose.connect(MONGODB_URI, {
             useNewUrlParser: true,
             useUnifiedTopology: true,
-            serverSelectionTimeoutMS: 10000,
+            serverSelectionTimeoutMS: 30000,
             socketTimeoutMS: 45000,
-            family: 4, // Force IPv4
-            retryWrites: true
+            directConnection: true,
+            retryWrites: true,
+            w: 'majority',
+            dns: {
+                useHostname: false // Disable SRV records lookup
+            }
         });
+        
         console.log(chalk.green('Connected to MongoDB Atlas'));
-
+        
+        // Wait a moment to ensure connection is stable
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
         // Initialize store
         store = new MongoStore({ mongoose: mongoose });
         await store.initialize();
-
+        
         // Create HTTP server first
         server = http.createServer((req, res) => {
             if (req.url === '/ping') {
@@ -405,9 +416,8 @@ async function initialize() {
 
     } catch (error) {
         console.error(chalk.red('MongoDB connection error:'), error);
-        // Add more detailed error information
-        if (error.code === 'EBADNAME') {
-            console.error(chalk.red('Invalid MongoDB URI format. Please check your connection string.'));
+        if (error.name === 'MongoServerSelectionError') {
+            console.error(chalk.red('Could not connect to MongoDB. Please check your connection string and network.'));
         }
         throw error;
     }
