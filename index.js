@@ -32,8 +32,11 @@ if (!fs.existsSync(SESSION_DIR)) {
     fs.mkdirSync(SESSION_DIR, { recursive: true });
 }
 
-// Add MongoDB URL (add this near the top with other constants)
-const MONGODB_URI = 'mongodb+srv://<username>:<password>@<cluster>.mongodb.net/whatbot?retryWrites=true&w=majority';
+// Add mongoose configuration before any database operations
+mongoose.set('strictQuery', true);
+
+// Update MongoDB URL with proper format
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://nwaozor:nwaozor@cluster0.rmvi7qm.mongodb.net/whatbot?retryWrites=true&w=majority&appName=Cluster0';
 
 // Add these utility functions before MessageQueue class
 const splitMessage = (text) => {
@@ -319,11 +322,14 @@ let store;
 // Initialize everything in sequence
 async function initialize() {
     try {
-        // Connect to MongoDB first
+        // Connect to MongoDB with enhanced options
         await mongoose.connect(MONGODB_URI, {
             useNewUrlParser: true,
             useUnifiedTopology: true,
-            serverSelectionTimeoutMS: 5000
+            serverSelectionTimeoutMS: 10000,
+            socketTimeoutMS: 45000,
+            family: 4, // Force IPv4
+            retryWrites: true
         });
         console.log(chalk.green('Connected to MongoDB Atlas'));
 
@@ -398,7 +404,11 @@ async function initialize() {
         return client;
 
     } catch (error) {
-        console.error(chalk.red('Initialization failed:'), error);
+        console.error(chalk.red('MongoDB connection error:'), error);
+        // Add more detailed error information
+        if (error.code === 'EBADNAME') {
+            console.error(chalk.red('Invalid MongoDB URI format. Please check your connection string.'));
+        }
         throw error;
     }
 }
