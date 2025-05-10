@@ -385,6 +385,16 @@ const handleConnectionState = (state) => {
     isConnected = state === 'CONNECTED';
 };
 
+// Add error event listener to handle unhandled errors
+process.on('uncaughtException', (error) => {
+    console.error(chalk.red('Uncaught Exception:'), error);
+    if (error.code === 'ENOENT' && error.path.includes('RemoteAuth-whatsapp-bot.zip')) {
+        console.warn(chalk.yellow('Ignoring ENOENT error for RemoteAuth ZIP file. Using Supabase session.'));
+    } else {
+        process.exit(1); // Exit only for non-ENOENT errors
+    }
+});
+
 const reconnect = async () => {
     if (reconnectAttempts < MAX_RETRIES) {
         reconnectAttempts++;
@@ -527,6 +537,9 @@ client.initialize()
     .then(() => handleConnectionState('INITIALIZING'))
     .catch(async (error) => {
         console.error(chalk.red('Initialization failed:'), error);
+        if (error.code === 'ENOENT' && error.path.includes('RemoteAuth-whatsapp-bot.zip')) {
+            console.warn(chalk.yellow('Ignoring ENOENT error for RemoteAuth ZIP file. Using Supabase session.'));
+        }
         handleConnectionState('INITIALIZATION_FAILED');
         await reconnect();
     });
