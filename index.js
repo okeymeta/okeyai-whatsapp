@@ -129,7 +129,7 @@ class SupabaseAuth extends RemoteAuth {
         // Pass the configuration object with clientId, backupSyncIntervalMs, store, and dataPath
         super({
             clientId: clientId,
-            backupSyncIntervalMs: 0, // Disable automatic backups
+            backupSyncIntervalMs: 60000, // Minimum allowed value (1 minute)
             store: store,
             dataPath: process.env.LOCAL_PATH || '/tmp'
         });
