@@ -129,13 +129,30 @@ class SupabaseAuth extends RemoteAuth {
         // Pass the configuration object with clientId, backupSyncIntervalMs, store, and dataPath
         super({
             clientId: clientId,
-            backupSyncIntervalMs: 60000, // 1 minute
+            backupSyncIntervalMs: 0, // Disable automatic backups
             store: store,
-            dataPath: '/tmp' // Use Render's temporary writable directory
+            dataPath: process.env.LOCAL_PATH || '/tmp'
         });
 
         this.clientId = clientId;
         this.sessionPath = `sessions/${clientId}`;
+    }
+
+    // Override ZIP-related methods to prevent ZIP operations
+    async afterLoad() {
+        return; // Do nothing, skip ZIP backup
+    }
+
+    async beforeSave() {
+        return; // Do nothing, skip ZIP preparation
+    }
+
+    async writeBackupFile() {
+        return; // Do nothing, skip ZIP writing
+    }
+
+    async readBackupFile() {
+        return null; // Return null to skip ZIP reading
     }
 
     async saveSession(session) {
@@ -537,9 +554,7 @@ client.initialize()
     .then(() => handleConnectionState('INITIALIZING'))
     .catch(async (error) => {
         console.error(chalk.red('Initialization failed:'), error);
-        if (error.code === 'ENOENT' && error.path.includes('RemoteAuth-whatsapp-bot.zip')) {
-            console.warn(chalk.yellow('Ignoring ENOENT error for RemoteAuth ZIP file. Using Supabase session.'));
-        }
+        // Remove ZIP error handling since we're preventing ZIP operations
         handleConnectionState('INITIALIZATION_FAILED');
         await reconnect();
     });
