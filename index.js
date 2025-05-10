@@ -111,7 +111,6 @@ class SupabaseAuth extends RemoteAuth {
                     console.error(chalk.red('Error clearing session from Supabase:'), error);
                 }
             },
-            // Add the sessionExists method to check if a session exists
             sessionExists: async () => {
                 try {
                     const { data, error } = await supabase.storage
@@ -119,19 +118,20 @@ class SupabaseAuth extends RemoteAuth {
                         .list(this.sessionPath);
                     
                     if (error) throw error;
-                    return data && data.length > 0; // Return true if there are files, false otherwise
+                    return data && data.length > 0;
                 } catch (error) {
                     console.error(chalk.red('Error checking session existence in Supabase:'), error);
-                    return false; // Return false on error to allow fallback to QR code
+                    return false;
                 }
             }
         };
 
-        // Pass the configuration object with clientId, backupSyncIntervalMs, and store
+        // Pass the configuration object with clientId, backupSyncIntervalMs, store, and dataPath
         super({
             clientId: clientId,
             backupSyncIntervalMs: 60000, // 1 minute
-            store: store
+            store: store,
+            dataPath: '/tmp' // Use Render's temporary writable directory
         });
 
         this.clientId = clientId;
