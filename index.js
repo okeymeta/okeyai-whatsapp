@@ -2,121 +2,175 @@ import axios from 'axios';
 import chalk from 'chalk';
 import qrcode from 'qrcode-terminal';
 import whatsappweb from 'whatsapp-web.js';
-import fs from 'fs';
-import { createRequire } from 'module'; // Add this line
-import sharp from 'sharp'; // Add this line
-import mongoose from 'mongoose';
-import http from 'http'; // Add this line
+import { createRequire } from 'module';
+import sharp from 'sharp';
+import { createClient } from '@supabase/supabase-js';
+import fs from 'fs/promises';
+import path from 'path';
 
-const require = createRequire(import.meta.url); // Add this line
-const Jimp = require('jimp'); // Direct require without destructuring
+const require = createRequire(import.meta.url);
+const Jimp = require('jimp');
 
-const { Client, LocalAuth, MessageMedia } = whatsappweb;
+const { Client, MessageMedia, RemoteAuth } = whatsappweb;
+
+// Hardcoded Supabase credentials
+const supabaseUrl = 'https://wuuggutodctswfhsdiux.supabase.co';
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind1dWdndXRvZGN0c3dmaHNkaXV4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDY5MDA3MDAsImV4cCI6MjA2MjQ3NjcwMH0.atPd30isC9n3Jph1JJoE3WihrZk8BQ9ZSZi0eYalGJY';
+if (!supabaseUrl || !supabaseKey) {
+    console.error(chalk.red('Supabase URL or key is not configured'));
+    process.exit(1);
+}
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Supabase bucket name
+const BUCKET_NAME = 'whatsapp-sessions';
 
 // Configure retry and rate limiting
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
-const MESSAGE_QUEUE_INTERVAL = 2000; // Time between messages (2 seconds)
-const TYPING_DURATION = { MIN: 2000, MAX: 4000 }; // Random typing duration between 2-4 seconds
-const MAX_CONCURRENT_CHATS = 15; // Maximum number of simultaneous chats
-const DAILY_MESSAGE_LIMIT = 1000; // Maximum messages per day
-const HOURLY_MESSAGE_LIMIT = 100; // Maximum messages per hour
+const MESSAGE_QUEUE_INTERVAL = 2000;
+const TYPING_DURATION = { MIN: 2000, MAX: 4000 };
+const MAX_CONCURRENT_CHATS = 15;
+const DAILY_MESSAGE_LIMIT = 1000;
+const HOURLY_MESSAGE_LIMIT = 100;
 const BOT_PREFIX = 'okeyai';
 const IMAGE_COMMAND = 'imagine';
-const IMAGE_TIMEOUT = 60000; // 60 seconds timeout for image generation
+const IMAGE_TIMEOUT = 60000;
 
-// Add these configurations at the top
-const KEEP_ALIVE_INTERVAL = 280000; // 4.6 minutes
-const MEMORY_CHECK_INTERVAL = 600000; // 10 minutes
-const MAX_MEMORY_USAGE = 1024 * 1024 * 512; // 512MB
+// Custom SupabaseAuth strategy
+class SupabaseAuth extends RemoteAuth {
+    constructor(clientId) {
+        // Define the store object that implements the required methods
+        const store = {
+            save: async ({ session }) => {
+                try {
+                    const sessionFiles = Object.entries(session).map(([key, value]) => ({
+                        name: `${key}.json`,
+                        data: Buffer.from(JSON.stringify(value)),
+                    }));
 
-// Add new constants
-const HEARTBEAT_INTERVAL = 3000; // 3 seconds
-const PRESENCE_INTERVAL = 5000; // 5 seconds
-const WATCHDOG_INTERVAL = 10000; // 10 seconds
-const CONNECTION_CHECK_INTERVAL = 15000; // 15 seconds
+                    for (const file of sessionFiles) {
+                        const filePath = `${this.sessionPath}/${file.name}`;
+                        await supabase.storage
+                            .from(BUCKET_NAME)
+                            .upload(filePath, file.data, {
+                                contentType: 'application/json',
+                                upsert: true,
+                            });
+                    }
+                    console.log(chalk.green('Session saved to Supabase'));
+                } catch (error) {
+                    console.error(chalk.red('Error saving session to Supabase:'), error);
+                    throw error;
+                }
+            },
+            extract: async () => {
+                try {
+                    const { data, error } = await supabase.storage
+                        .from(BUCKET_NAME)
+                        .list(this.sessionPath);
+                    
+                    if (error) throw error;
+                    if (!data || data.length === 0) return null;
 
-// Create sessions directory if it doesn't exist
-const SESSION_DIR = './.wwebjs_auth';
-if (!fs.existsSync(SESSION_DIR)) {
-    fs.mkdirSync(SESSION_DIR, { recursive: true });
-}
-
-// MongoDB Connection
-const MONGODB_URI = 'mongodb+srv://nwaozor:nwaozor@cluster0.rmvi7qm.mongodb.net/whatbot?retryWrites=true&w=majority';
-
-mongoose.connect(MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
-}).then(() => {
-    console.log(chalk.green('Connected to MongoDB'));
-}).catch(err => {
-    console.error(chalk.red('MongoDB connection error:'), err);
-});
-
-// Create MongoDB Schema for WhatsApp session
-const sessionSchema = new mongoose.Schema({
-    sessionId: String,
-    session: Object
-});
-
-const Session = mongoose.model('Session', sessionSchema);
-
-// Custom MongoDB-based auth strategy
-class MongoDBAuth extends LocalAuth {
-    async beforeBrowserInitialize() {
-        const sessionData = await Session.findOne({ sessionId: 'whatsapp-bot' });
-        if (sessionData) {
-            await super.beforeBrowserInitialize();
-            const sessionDir = `${this.dataPath}/session`;
-            if (!fs.existsSync(sessionDir)) {
-                fs.mkdirSync(sessionDir, { recursive: true });
+                    const session = {};
+                    for (const file of data) {
+                        const { data: fileData, error: fileError } = await supabase.storage
+                            .from(BUCKET_NAME)
+                            .download(`${this.sessionPath}/${file.name}`);
+                        
+                        if (fileError) throw fileError;
+                        
+                        const text = await fileData.text();
+                        const key = file.name.replace('.json', '');
+                        session[key] = JSON.parse(text);
+                    }
+                    console.log(chalk.green('Session loaded from Supabase'));
+                    return session;
+                } catch (error) {
+                    console.error(chalk.red('Error loading session from Supabase:'), error);
+                    return null;
+                }
+            },
+            remove: async () => {
+                try {
+                    const { data, error } = await supabase.storage
+                        .from(BUCKET_NAME)
+                        .list(this.sessionPath);
+                    
+                    if (error) throw error;
+                    
+                    const filePaths = data.map(file => `${this.sessionPath}/${file.name}`);
+                    if (filePaths.length > 0) {
+                        await supabase.storage
+                            .from(BUCKET_NAME)
+                            .remove(filePaths);
+                        console.log(chalk.green('Session cleared from Supabase'));
+                    }
+                } catch (error) {
+                    console.error(chalk.red('Error clearing session from Supabase:'), error);
+                }
+            },
+            // Add the sessionExists method to check if a session exists
+            sessionExists: async () => {
+                try {
+                    const { data, error } = await supabase.storage
+                        .from(BUCKET_NAME)
+                        .list(this.sessionPath);
+                    
+                    if (error) throw error;
+                    return data && data.length > 0; // Return true if there are files, false otherwise
+                } catch (error) {
+                    console.error(chalk.red('Error checking session existence in Supabase:'), error);
+                    return false; // Return false on error to allow fallback to QR code
+                }
             }
-            fs.writeFileSync(
-                `${sessionDir}/session.json`,
-                JSON.stringify(sessionData.session)
-            );
-        }
+        };
+
+        // Pass the configuration object with clientId, backupSyncIntervalMs, and store
+        super({
+            clientId: clientId,
+            backupSyncIntervalMs: 60000, // 1 minute
+            store: store
+        });
+
+        this.clientId = clientId;
+        this.sessionPath = `sessions/${clientId}`;
     }
 
-    async afterBrowserInitialize() {
-        const sessionDir = `${this.dataPath}/session`;
-        if (fs.existsSync(`${sessionDir}/session.json`)) {
-            const sessionData = JSON.parse(
-                fs.readFileSync(`${sessionDir}/session.json`, 'utf8')
-            );
-            await Session.findOneAndUpdate(
-                { sessionId: 'whatsapp-bot' },
-                { session: sessionData },
-                { upsert: true }
-            );
-        }
-        await super.afterBrowserInitialize();
+    async saveSession(session) {
+        await this.store.save({ session });
+    }
+
+    async loadSession() {
+        return await this.store.extract();
+    }
+
+    async clearSession() {
+        await this.store.remove();
     }
 }
 
-// Add these utility functions before MessageQueue class
+// Utility functions
 const splitMessage = (text) => {
     const MAX_LENGTH = 990;
     if (text.length <= MAX_LENGTH) return [text];
 
     const segments = [];
     let currentSegment = "";
-    
-    // Split by sentences first
+
     const sentences = text.split(/(?<=[.!?])\s+/);
-    
+
     for (const sentence of sentences) {
         if ((currentSegment + sentence).length <= MAX_LENGTH) {
             currentSegment += (currentSegment ? " " : "") + sentence;
         } else {
             if (currentSegment) segments.push(currentSegment);
-            
-            // If single sentence is too long, split by words
+
             if (sentence.length > MAX_LENGTH) {
                 const words = sentence.split(" ");
                 currentSegment = "";
-                
+
                 for (const word of words) {
                     if ((currentSegment + " " + word).length <= MAX_LENGTH) {
                         currentSegment += (currentSegment ? " " : "") + word;
@@ -130,39 +184,30 @@ const splitMessage = (text) => {
             }
         }
     }
-    
+
     if (currentSegment) segments.push(currentSegment);
-    
-    // Add continuation markers
+
     return segments.map((segment, index) => 
         `${segment.trim()}${index < segments.length - 1 ? ' (continued...)' : ''}`
     );
 };
 
-// Add new utility function for image generation
 const generateImage = async (prompt) => {
     const encodedPrompt = encodeURIComponent(prompt);
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=flux-pro&nologo=true&enhance=true&private=true`;
-    
-    // Pre-fetch image to ensure it's ready
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?&model=flux-pro&nologo=true&enhance=true&private=true`;
     await axios.head(imageUrl);
     return imageUrl;
 };
 
-// Add new utility function for watermarking images
 async function addWatermark(imageBuffer) {
     try {
         const watermarkText = "OkeyMeta AI";
-        
-        // Create SVG text overlay
         const svgText = `
             <svg width="200" height="50">
                 <rect x="0" y="0" width="200" height="50" fill="rgba(0,0,0,0.5)"/>
                 <text x="10" y="35" font-family="Arial" font-size="24" fill="white">${watermarkText}</text>
             </svg>
         `;
-
-        // Process image with sharp
         const processedImage = await sharp(imageBuffer)
             .composite([{
                 input: Buffer.from(svgText),
@@ -170,34 +215,25 @@ async function addWatermark(imageBuffer) {
             }])
             .jpeg()
             .toBuffer();
-
         return processedImage;
     } catch (error) {
         console.error(chalk.red('Error adding watermark:'), error);
-        console.error(error.stack);
         throw error;
     }
 }
 
-// Add image generation tracking
-const activeImageGenerations = new Map();
-
-// Modify the sendWhatsAppImage function
 async function sendWhatsAppImage(chat, caption, imageUrl) {
     try {
         const response = await axios.get(imageUrl, { 
             responseType: 'arraybuffer',
-            timeout: 30000 // 30 second timeout
+            timeout: 30000
         });
-        
         const watermarkedBuffer = await addWatermark(response.data);
-        
         const media = new MessageMedia(
             'image/jpeg',
             watermarkedBuffer.toString('base64'),
             'generated_image.jpg'
         );
-        
         await chat.sendMessage(media, { caption });
     } catch (error) {
         console.error(chalk.red('Error sending image:'), error);
@@ -208,19 +244,16 @@ async function sendWhatsAppImage(chat, caption, imageUrl) {
 // Message queue and rate limiting
 class MessageQueue {
     constructor() {
-        this.queue = new Map(); // Queue for each user
-        this.messageCount = new Map(); // Track message counts
+        this.queue = new Map();
+        this.messageCount = new Map();
         this.activeChatCount = 0;
         this.dailyMessages = 0;
         this.hourlyMessages = 0;
         this.lastReset = Date.now();
-        this.userLastMessage = new Map(); // Track last message time per user
-        this.userMessageCount = new Map(); // Track message count per user
-        this.typing = new Map(); // Track typing state per user
-        
-        // Reset counters periodically
-        setInterval(() => this.resetHourlyCount(), 3600000); // Reset hourly
-        setInterval(() => this.resetDailyCount(), 86400000); // Reset daily
+        this.userLastMessage = new Map();
+        this.userMessageCount = new Map();
+        setInterval(() => this.resetHourlyCount(), 3600000);
+        setInterval(() => this.resetDailyCount(), 86400000);
     }
 
     resetHourlyCount() {
@@ -233,14 +266,11 @@ class MessageQueue {
 
     canProcessMessage() {
         const now = Date.now();
-        
-        // Reset counters if a day has passed
         if (now - this.lastReset > 86400000) {
             this.resetDailyCount();
             this.resetHourlyCount();
             this.lastReset = now;
         }
-
         return this.activeChatCount < MAX_CONCURRENT_CHATS &&
                this.dailyMessages < DAILY_MESSAGE_LIMIT &&
                this.hourlyMessages < HOURLY_MESSAGE_LIMIT;
@@ -250,50 +280,30 @@ class MessageQueue {
         const now = Date.now();
         const lastMessage = this.userLastMessage.get(userId) || 0;
         const userCount = this.userMessageCount.get(userId) || 0;
-        
-        // Reset user count if last message was more than an hour ago
         if (now - lastMessage > 3600000) {
             this.userMessageCount.set(userId, 0);
             return true;
         }
-
-        // Limit to 50 messages per hour per user
-        if (userCount >= 50) {
-            return false;
-        }
-
-        // Ensure minimum 3 second gap between messages from same user
-        if (now - lastMessage < 3000) {
-            return false;
-        }
-
+        if (userCount >= 50) return false;
+        if (now - lastMessage < 3000) return false;
         return true;
     }
 
     async addToQueue(chat, message, handler) {
         const userId = message.from;
-
-        // Mark message as seen immediately
         await chat.sendSeen();
-        
         if (!await this.checkUserRateLimit(userId)) {
             await client.sendMessage(userId, 
                 "Please wait a moment before sending more messages. This helps maintain service quality.");
             return;
         }
-
-        // Update user message tracking
         this.userLastMessage.set(userId, Date.now());
         this.userMessageCount.set(userId, (this.userMessageCount.get(userId) || 0) + 1);
-
         if (!this.queue.has(userId)) {
             this.queue.set(userId, []);
             this.messageCount.set(userId, 0);
         }
-
         this.queue.get(userId).push({ chat, message, handler });
-        
-        // Start processing queue for this user if not already processing
         if (this.queue.get(userId).length === 1) {
             this.processQueue(userId);
         }
@@ -301,199 +311,102 @@ class MessageQueue {
 
     async processQueue(userId) {
         const userQueue = this.queue.get(userId);
-        
         while (userQueue.length > 0) {
             if (!this.canProcessMessage()) {
-                // Wait and check again if limits are exceeded
                 await new Promise(resolve => setTimeout(resolve, 5000));
                 continue;
             }
-
             const { chat, message, handler } = userQueue[0];
-            
             try {
                 this.activeChatCount++;
                 this.dailyMessages++;
                 this.hourlyMessages++;
-                
-                // Show typing indicator with smart duration
-                await this.showTyping(chat, Math.min(
+                await chat.sendStateTyping();
+                const typingDuration = Math.min(
                     Math.max(message.body.length * 50, TYPING_DURATION.MIN),
                     TYPING_DURATION.MAX
-                ));
-                
-                // Process message with response splitting
+                );
+                await new Promise(resolve => setTimeout(resolve, typingDuration));
                 const result = await handler();
                 if (result) {
                     const segments = splitMessage(result);
                     for (const segment of segments) {
-                        await this.showTyping(chat, Math.min(segment.length * 50, 3000));
+                        await chat.sendStateTyping();
+                        await new Promise(resolve => 
+                            setTimeout(resolve, Math.min(segment.length * 50, 3000))
+                        );
                         await client.sendMessage(message.from, segment);
-                        // Add delay between segments
                         if (segments.length > 1) {
                             await new Promise(resolve => setTimeout(resolve, 1000));
                         }
                     }
                 }
-                
             } catch (error) {
                 console.error(chalk.red(`Error processing message for user ${userId}:`), error);
-                // Add error recovery logic
                 if (error.message.includes('timeout')) {
                     await client.sendMessage(message.from, 
                         "I'm experiencing a temporary delay. Please try again in a moment.");
                 }
             } finally {
                 this.activeChatCount--;
-                userQueue.shift(); // Remove processed message
-                
-                // Add delay between messages
+                userQueue.shift();
                 if (userQueue.length > 0) {
                     await new Promise(resolve => setTimeout(resolve, MESSAGE_QUEUE_INTERVAL));
                 }
             }
         }
-        
-        // Clear queue for user if empty
         if (userQueue.length === 0) {
             this.queue.delete(userId);
             this.messageCount.delete(userId);
-        }
-    }
-
-    async showTyping(chat, duration) {
-        if (this.typing.has(chat.id._serialized)) return;
-        
-        this.typing.set(chat.id._serialized, true);
-        try {
-            await chat.sendStateTyping();
-            await new Promise(resolve => setTimeout(resolve, duration));
-        } finally {
-            this.typing.delete(chat.id._serialized);
         }
     }
 }
 
 // Instantiate message queue
 const messageQueue = new MessageQueue();
+const activeImageGenerations = new Map();
 
-// Add port binding
-const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('WhatsApp bot is running');
-});
-server.listen(process.env.PORT || 3000, '0.0.0.0');
-
-// Instantiate new WhatsApp client with persistent session
+// Instantiate WhatsApp client with SupabaseAuth
 const client = new Client({
-    authStrategy: new MongoDBAuth({
-        clientId: 'whatsapp-bot',
-        dataPath: SESSION_DIR
-    }),
+    authStrategy: new SupabaseAuth('whatsapp-bot'),
     puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-extensions',
-            '--disable-software-rasterizer',
-            '--disable-web-security',
-            '--aggressive-cache-discard',
-            '--disable-cache',
-            '--disable-application-cache',
-            '--disable-offline-load-stale-cache',
-            '--disk-cache-size=0',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-breakpad',
-            '--disable-component-extensions-with-background-pages',
-            '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-            '--disable-ipc-flooding-protection',
-            '--disable-renderer-backgrounding',
-            '--enable-features=NetworkService,NetworkServiceInProcess',
-            '--force-color-profile=srgb',
-            '--metrics-recording-only',
-            '--no-first-run',
-            '--js-flags="--max-old-space-size=4096"',
-            '--optimize-for-size',
-            '--memory-pressure-off',
-            '--disable-dev-shm-usage'
-        ],
-        defaultViewport: null,
-        timeout: 0,
-        browserWSEndpoint: null,
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true
     },
-    restartOnAuthFail: true,
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 0,
-    qrMaxRetries: Infinity,
-    connectTimeoutMs: 0,
-    authTimeoutMs: 0,
-    waitForLogin: true
+    restartOnAuthFail: true
 });
 
 // Connection status tracking
 let isConnected = false;
 let reconnectAttempts = 0;
 
-// Connection state management
 const handleConnectionState = (state) => {
     console.log(chalk.yellow(`Connection state: ${state}`));
     isConnected = state === 'CONNECTED';
 };
 
-// Enhanced reconnection logic
 const reconnect = async () => {
-    try {
-        console.log(chalk.yellow('Attempting reconnection...'));
-        
-        // Proper cleanup
-        if (client.pupPage) {
-            await client.pupPage.close().catch(() => {});
-        }
-        if (client.pupBrowser) {
-            await client.pupBrowser.close().catch(() => {});
-        }
-        
-        // Wait before reconnecting
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        
-        // Clear any existing sessions
-        try {
-            fs.rmSync('./user_data', { recursive: true, force: true });
-        } catch (err) {}
-        
-        // Initialize with fresh session
-        await client.initialize();
-        
-        console.log(chalk.green('Reconnection successful'));
-        reconnectAttempts = 0;
-
-        // Force presence update after reconnection
-        await client.sendPresenceAvailable();
-        await client.setStatus('Online and ready!');
-    } catch (error) {
-        console.error(chalk.red('Reconnection failed:'), error);
+    if (reconnectAttempts < MAX_RETRIES) {
         reconnectAttempts++;
-        
-        if (reconnectAttempts < MAX_RETRIES) {
-            setTimeout(reconnect, RETRY_DELAY * reconnectAttempts);
-        } else {
-            console.log(chalk.red('Max retries reached, restarting process...'));
-            process.exit(1); // Let process manager handle restart
+        console.log(chalk.yellow(`Attempting to reconnect... (Attempt ${reconnectAttempts}/${MAX_RETRIES})`));
+        try {
+            await client.initialize();
+        } catch (error) {
+            console.error(chalk.red('Reconnection failed:'), error);
+            setTimeout(reconnect, RETRY_DELAY);
         }
+    } else {
+        console.error(chalk.red('Max reconnection attempts reached. Please restart the application.'));
+        process.exit(1);
     }
 };
 
-// QR code event handler
 client.on('qr', (qr) => {
     console.clear();
     console.log('\n1. Open WhatsApp on your phone\n2. Tap Menu or Settings and select WhatsApp Web\n3. Point your phone to this screen to capture the code\n');
     qrcode.generate(qr, { small: true });
 });
 
-// Authentication event handlers
 client.on('authenticated', () => {
     console.log(chalk.green('WhatsApp authentication successful!\n'));
     reconnectAttempts = 0;
@@ -506,19 +419,14 @@ client.on('auth_failure', async (message) => {
     await reconnect();
 });
 
-// Ready event handler
 client.on('ready', () => {
     isConnected = true;
     handleConnectionState('CONNECTED');
     console.log(chalk.green('OkeyAI is ready and connected!\n'));
     console.log(chalk.greenBright('OkeyAI activated. Listening for messages...\n'));
-    // Store bot start time
     global.botStartTime = Date.now();
-    keepAlive();
-    checkMemoryUsage();
 });
 
-// Disconnection handler
 client.on('disconnected', async (reason) => {
     console.log(chalk.red('Client disconnected:'), reason);
     isConnected = false;
@@ -526,56 +434,40 @@ client.on('disconnected', async (reason) => {
     await reconnect();
 });
 
-// Message handler with retry mechanism
 client.on('message', async (message) => {
     if (!isConnected) return;
-
     try {
         const chat = await message.getChat();
         const trimmedMessage = message.body.trim();
-        
-        // Early return if empty message
         if (!trimmedMessage) return;
-
         const isGroupChat = chat.id._serialized.endsWith('@g.us');
         let processedMessage = trimmedMessage;
         let shouldProcess = false;
         let isImageRequest = false;
-
-        // Check for image generation command
         const lowerCaseMsg = trimmedMessage.toLowerCase();
         if (lowerCaseMsg.startsWith(`${BOT_PREFIX} ${IMAGE_COMMAND}`) || 
             (!isGroupChat && lowerCaseMsg.startsWith(IMAGE_COMMAND))) {
-            
             isImageRequest = true;
             const prompt = isGroupChat ? 
                 trimmedMessage.slice(`${BOT_PREFIX} ${IMAGE_COMMAND}`.length).trim() :
                 trimmedMessage.slice(IMAGE_COMMAND.length).trim();
-
             if (!prompt) {
                 await chat.sendMessage("Please provide a description of what you want to imagine.");
                 return;
             }
-
-            // Check if already generating for this chat
             if (activeImageGenerations.has(chat.id._serialized)) {
                 await chat.sendMessage("I'm already generating an image for you. Please wait...");
                 return;
             }
-
             try {
                 activeImageGenerations.set(chat.id._serialized, true);
                 await chat.sendMessage("🎨 Generating your image...");
-
-                // Generate image with timeout
                 const imagePromise = generateImage(prompt);
                 const timeoutPromise = new Promise((_, reject) =>
                     setTimeout(() => reject(new Error('Image generation timed out')), IMAGE_TIMEOUT)
                 );
-
                 const imageUrl = await Promise.race([imagePromise, timeoutPromise]);
                 await sendWhatsAppImage(chat, "✨ Here's your generated image!", imageUrl);
-
             } catch (error) {
                 console.error(chalk.red('Image generation error:'), error);
                 await chat.sendMessage("Sorry, I couldn't generate that image. Please try again.");
@@ -584,8 +476,6 @@ client.on('message', async (message) => {
             }
             return;
         }
-
-        // Handle regular messages
         if (isGroupChat) {
             if (trimmedMessage.toLowerCase().startsWith(BOT_PREFIX)) {
                 processedMessage = trimmedMessage.slice(BOT_PREFIX.length).trim();
@@ -594,23 +484,17 @@ client.on('message', async (message) => {
         } else {
             shouldProcess = true;
         }
-
-        // Rest of your existing message handling code
         if (shouldProcess) {
             await processMessageWithQueue(chat, message, processedMessage);
         }
-
     } catch (error) {
         console.error(chalk.red('Message handling error:'), error);
-        console.error(error.stack); // Add stack trace for better debugging
         handleConnectionState('ERROR');
     }
 });
 
-// Helper function to process messages through queue
 async function processMessageWithQueue(chat, message, processedContent) {
     await chat.sendSeen();
-    
     await messageQueue.addToQueue(chat, {
         ...message,
         body: processedContent
@@ -627,7 +511,6 @@ async function processMessageWithQueue(chat, message, processedContent) {
                     timeout: 90000
                 }
             );
-
             if (response.data?.response) {
                 return response.data.response.trim();
             }
@@ -639,7 +522,6 @@ async function processMessageWithQueue(chat, message, processedContent) {
     });
 }
 
-// Initialize client with connection state handling
 console.log('Starting WhatsApp client...\n');
 client.initialize()
     .then(() => handleConnectionState('INITIALIZING'))
@@ -649,108 +531,18 @@ client.initialize()
         await reconnect();
     });
 
-// Add connection watchdog
-const connectionWatchdog = {
-    lastPing: Date.now(),
-    isHealthy: true,
-    check() {
-        const now = Date.now();
-        this.isHealthy = now - this.lastPing < 30000;
-        return this.isHealthy;
-    },
-    ping() {
-        this.lastPing = Date.now();
-    }
-};
-
-// Enhanced keep-alive mechanism
-const keepAlive = () => {
-    // Aggressive heartbeat
-    setInterval(async () => {
-        try {
-            if (!isConnected) await reconnect();
-            connectionWatchdog.ping();
-            await client.sendPresenceAvailable();
-        } catch (error) {
-            console.error(chalk.red('Heartbeat error, continuing...'));
-        }
-    }, HEARTBEAT_INTERVAL);
-
-    // Presence management
-    setInterval(async () => {
-        try {
-            await client.sendPresenceAvailable();
-            await client.setStatus('Online and ready!');
-        } catch (error) {
-            console.error(chalk.red('Presence update error'));
-        }
-    }, PRESENCE_INTERVAL);
-
-    // Connection monitoring
-    setInterval(() => {
-        if (!connectionWatchdog.check()) {
-            console.log(chalk.yellow('Connection watchdog triggered reconnection'));
-            reconnect();
-        }
-    }, WATCHDOG_INTERVAL);
-
-    // Health check
-    setInterval(async () => {
-        try {
-            const response = await axios.get(`http://localhost:${process.env.PORT || 3000}`);
-            if (response.status !== 200) throw new Error('Health check failed');
-        } catch (error) {
-            console.error(chalk.red('Health check error'));
-        }
-    }, CONNECTION_CHECK_INTERVAL);
-};
-
-// Add memory management
-const checkMemoryUsage = () => {
-    const used = process.memoryUsage();
-    if (used.heapUsed > MAX_MEMORY_USAGE) {
-        console.log(chalk.yellow('High memory usage detected, running garbage collection...'));
-        if (global.gc) {
-            global.gc();
-        }
-    }
-};
-
-// Add process error handlers to prevent crashes
-process.on('uncaughtException', (err) => {
-    console.error(chalk.red('Uncaught Exception:'), err);
-    reconnect();
-});
-
-process.on('unhandledRejection', (err) => {
-    console.error(chalk.red('Unhandled Rejection:'), err);
-    reconnect();
-});
-
-// Add crash handling
-process.on('SIGTERM', async () => {
+const shutdown = async () => {
+    console.log(chalk.yellow('\nShutting down...'));
     try {
+        handleConnectionState('SHUTTING_DOWN');
         await client.destroy();
-    } finally {
-        process.exit(0);
+        console.log(chalk.green('Successfully logged out and cleaned up.'));
+    } catch (error) {
+        console.error(chalk.red('Error during shutdown:'), error);
+        handleConnectionState('SHUTDOWN_ERROR');
     }
-});
+    process.exit(0);
+};
 
-process.on('uncaughtException', async (err) => {
-    console.error(chalk.red('Uncaught Exception:'), err);
-    try {
-        await client.destroy();
-    } finally {
-        process.exit(1);
-    }
-});
-
-// Add connection state handlers
-client.on('change_state', state => {
-    console.log(chalk.blue(`State changed to: ${state}`));
-    connectionWatchdog.ping();
-});
-
-client.on('change_battery', batteryInfo => {
-    console.log(chalk.blue(`Battery: ${batteryInfo.battery}% - Charging: ${batteryInfo.plugged}`));
-});
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

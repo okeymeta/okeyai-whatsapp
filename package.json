@@ -9,14 +9,15 @@
     "render-start": "node index.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.4",
     "axios": "^1.6.2",
     "chalk": "^5.3.0",
-    "qrcode-terminal": "^0.12.0",
-    "whatsapp-web.js": "^1.23.0",
-    "sharp": "^0.32.6",
     "jimp": "^0.22.10",
-    "pm2": "^5.3.0",
     "mongoose": "^6.9.1",
+    "pm2": "^5.3.0",
+    "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.32.6",
+    "whatsapp-web.js": "^1.23.0",
     "wwebjs-mongo": "^1.1.0"
   }
 }

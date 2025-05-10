@@ -3,14 +3,14 @@ services:
     name: whatbot
     env: node
     buildCommand: npm install
-    startCommand: npm run render-start
+    startCommand: npm start
     envVars:
       - key: NODE_VERSION
         value: 18.x
-      - key: IS_RENDER
-        value: true
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: 3000
     disk:
       name: tmp-data
       mountPath: /tmp
